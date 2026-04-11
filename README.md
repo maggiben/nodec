@@ -172,6 +172,4 @@ include/       Minimal system headers for `#include <...>`
 examples/      Sample C programs
 ```
 
-## License
-
-This repository does not include a license file by default; add one before redistributing or publishing the package.
+## License MIT

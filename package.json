@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "TypeScript port of C11 compiler for JavaScript runtime",
+  "license": "MIT",
   "bin": {
     "nodec": "./dist/cli.js"
   },
