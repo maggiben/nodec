@@ -28,10 +28,10 @@ int main() {
   int n;
   printf("Enter the initial number: ");
   scanf("%d", &n);
-  while (TRUE) {
+  for (;;) {
     if (is_prime(n)) {
       printf("%d\n", n);
-      sleep(1);
+      sleep(0.1);
     }
     n = n + 1;
   }
