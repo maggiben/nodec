@@ -8,6 +8,11 @@ import type { Layout } from "./jsCodegen.js";
 export type HostHooks = {
   /** Default: line to stdout via console.log */
   log: (line: string) => void;
+  /**
+   * One line of stdin (no trailing newline), used by scanf.
+   * If omitted, scanf matches no conversions and returns 0.
+   */
+  readLine?: () => string;
 };
 
 function readCString(mem: Uint8Array, addr: bigint): string {
@@ -68,6 +73,42 @@ function formatPrintf(mem: Uint8Array, fmtAddr: bigint, args: PrintfArg[]): stri
   return out;
 }
 
+/**
+ * One readLine per call; parses %d / %i / %u (whitespace-separated tokens).
+ * Returns one bigint per conversion; used by codegen so stack locals are assigned in JS instead of via fake addresses.
+ */
+function scanfReadValues(mem: Uint8Array, hooks: HostHooks, fmtAddr: bigint): bigint[] {
+  const fmt = readCString(mem, fmtAddr);
+  const line = hooks.readLine?.() ?? "";
+  const tokens = line.trim().length === 0 ? [] : line.trim().split(/\s+/);
+  let ti = 0;
+  const values: bigint[] = [];
+  for (let i = 0; i < fmt.length; ) {
+    if (fmt[i] === "%" && i + 1 < fmt.length) {
+      const c = fmt[++i];
+      if (c === "d" || c === "i") {
+        const tok = tokens[ti++] ?? "0";
+        const parsed = Number.parseInt(tok, 10);
+        const n = Number.isFinite(parsed) ? parsed | 0 : 0;
+        values.push(BigInt(n));
+      } else if (c === "u") {
+        const tok = tokens[ti++] ?? "0";
+        const parsed = Number.parseInt(tok, 10);
+        const n = Number.isFinite(parsed) ? parsed >>> 0 : 0;
+        values.push(BigInt(n));
+      } else if (c === "%") {
+        i++;
+      }
+      i++;
+    } else if (/\s/.test(fmt[i]!)) {
+      i++;
+    } else {
+      i++;
+    }
+  }
+  return values;
+}
+
 export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: number) {
   let heapPtr = alignTo(heapBase, 16);
   /** POSIX-style PRNG state (glibc-style LCG). */
@@ -113,6 +154,8 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     hooks.log(line);
     return 0n;
   };
+
+  const scanfParsed = (fmtAddr: bigint) => scanfReadValues(mem, hooks, fmtAddr);
 
   /** Bump allocator: pointers are stable for the VM run; free() is a no-op. */
   const malloc = (size: bigint) => {
@@ -195,6 +238,7 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     ptrSub,
     printf,
     sprintf,
+    scanfParsed,
     malloc,
     free,
     srand,

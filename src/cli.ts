@@ -1,7 +1,28 @@
 #!/usr/bin/env node
 import { runCompiled, compileFile, defaultIncludePaths } from "./compile.js";
-import { writeFileSync } from "node:fs";
+import { readSync } from "node:fs";
 import { resolve } from "node:path";
+
+/** Blocking read of one line from fd 0 (for scanf in the VM). */
+function readLineSync(): string {
+  const chunks: number[] = [];
+  const buf = Buffer.alloc(1);
+  for (;;) {
+    let n: number;
+    try {
+      n = readSync(0, buf, 0, 1, null);
+    } catch {
+      break;
+    }
+    if (n === 0) break;
+    const c = buf[0]!;
+    if (c === 10) break;
+    if (c === 13) continue;
+    chunks.push(c);
+  }
+  const line = Buffer.from(chunks).toString("utf8");
+  return line;
+}
 
 const argv = process.argv.slice(2);
 
@@ -20,7 +41,7 @@ const cmd = argv[0];
 const file = resolve(argv[1]!);
 
 if (cmd === "run") {
-  const hooks = { log: (line: string) => console.log(line) };
+  const hooks = { log: (line: string) => console.log(line), readLine: readLineSync };
   try {
     const { exitCode } = runCompiled(file, hooks, defaultIncludePaths(file));
     process.exit(Number(exitCode));

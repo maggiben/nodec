@@ -90,6 +90,61 @@ export type Layout = {
   heapBase: number;
 };
 
+type ScanfTarget =
+  | { k: "local"; js: string }
+  | { k: "mem"; ptr: string; size: number };
+
+function pointeeSize(ptrNode: Node): number {
+  const t = ptrNode.ty;
+  if (t?.kind === TypeKind.Ptr && t.base) return t.base.size;
+  return 4;
+}
+
+function classifyScanfPtr(
+  ptrArg: Node,
+  fn: Obj,
+  localJs: Map<Obj, string>,
+  layout: Layout,
+  globalOffConst: Map<string, string>,
+  definedFns: Set<string>
+): ScanfTarget {
+  if (ptrArg.kind === NodeKind.Addr && ptrArg.lhs?.kind === NodeKind.Var) {
+    const v = ptrArg.lhs.var!;
+    if (v.isLocal) {
+      const js = localJs.get(v);
+      if (js) return { k: "local", js };
+    }
+  }
+  return {
+    k: "mem",
+    ptr: emitExpr(ptrArg, fn, localJs, layout, globalOffConst, definedFns),
+    size: pointeeSize(ptrArg),
+  };
+}
+
+function emitScanfCall(
+  n: Node,
+  fn: Obj,
+  localJs: Map<Obj, string>,
+  layout: Layout,
+  globalOffConst: Map<string, string>,
+  definedFns: Set<string>
+): string {
+  const fmtNode = n.args;
+  if (!fmtNode) return "0n";
+  const fmtJs = emitExpr(fmtNode, fn, localJs, layout, globalOffConst, definedFns);
+  const targets: ScanfTarget[] = [];
+  for (let a = fmtNode.next; a; a = a.next)
+    targets.push(classifyScanfPtr(a, fn, localJs, layout, globalOffConst, definedFns));
+  const assigns = targets
+    .map((t, i) => {
+      if (t.k === "local") return `${t.js} = _s[${i}] ?? 0n;`;
+      return `__rt.store(${t.ptr}, _s[${i}] ?? 0n, ${t.size});`;
+    })
+    .join(" ");
+  return `((() => { const _s = __rt.scanfParsed(${fmtJs}); ${assigns} return BigInt(_s.length); })())`;
+}
+
 export function layoutProgram(prog: Obj | null): Layout {
   const memory = new Uint8Array(1024 * 1024);
   let off = 0;
@@ -246,6 +301,7 @@ function emitExpr(
       for (let a = n.args; a; a = a.next) args.push(emitExpr(a, fn, localJs, layout, globalOffConst, definedFns));
       if (name === "printf") return `__rt.printf(${args.join(", ")})`;
       if (name === "sprintf") return `__rt.sprintf(${args.join(", ")})`;
+      if (name === "scanf") return emitScanfCall(n, fn, localJs, layout, globalOffConst, definedFns);
       if (name === "malloc") return `__rt.malloc(${args.join(", ")})`;
       if (name === "free") return `__rt.free(${args.join(", ")})`;
       if (name === "srand") return `__rt.srand(${args.join(", ")})`;
