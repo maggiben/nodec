@@ -1127,6 +1127,83 @@ function stmt(ctx: { t: Token | null }, tok: Token): Node | null {
     node.contLabel = cont;
     return node;
   }
+  if (equal(t, "switch")) {
+    t = skip(t.next!, "(");
+    const cond = expr(ctx, t);
+    t = ctx.t!;
+    t = skip(t, ")");
+    const lbrace = t;
+    t = skip(t, "{");
+    const sw = newNode(NodeKind.Switch, tok);
+    sw.cond = cond;
+    const brk = newUniqueName();
+    const prevB = brkLabel;
+    brkLabel = brk;
+    sw.brkLabel = brk;
+    enterScope();
+    const block = newNode(NodeKind.Block, lbrace);
+    let head: Node | null = null;
+    let cur: Node | null = null;
+    const append = (n: Node | null): void => {
+      if (!n) return;
+      if (!head) head = n;
+      else cur!.next = n;
+      cur = n;
+      while (cur!.next) cur = cur.next;
+    };
+    const parseCaseStmts = (): { t: Token; head: Node | null } => {
+      let stHead: Node | null = null;
+      let stCur: Node | null = null;
+      while (!equal(t, "}") && !equal(t, "case") && !equal(t, "default")) {
+        const st = stmt(ctx, t);
+        t = ctx.t!;
+        if (!st) continue;
+        if (!stHead) stHead = st;
+        else stCur!.next = st;
+        stCur = st;
+        while (stCur!.next) stCur = stCur.next;
+      }
+      return { t, head: stHead };
+    };
+    while (!equal(t, "}")) {
+      if (isTypename(t) || equal(t, "static")) {
+        const n = declaration(ctx, t);
+        t = ctx.t!;
+        append(n);
+        continue;
+      }
+      if (equal(t, "case")) {
+        const caseTok = t;
+        t = t.next!;
+        const val = constExpr(ctx, t);
+        t = ctx.t!;
+        t = skip(t, ":");
+        const cn = newNode(NodeKind.Case, caseTok);
+        cn.begin = val;
+        const parsed = parseCaseStmts();
+        t = parsed.t;
+        cn.body = parsed.head;
+        append(cn);
+        continue;
+      }
+      if (equal(t, "default")) {
+        if (sw.defaultCase) errorTok(t, "duplicate default");
+        t = skip(t.next!, ":");
+        const parsed = parseCaseStmts();
+        t = parsed.t;
+        sw.defaultCase = parsed.head;
+        continue;
+      }
+      errorTok(t, "invalid statement in switch body");
+    }
+    t = skip(t, "}");
+    block.body = head;
+    sw.body = block;
+    leaveScope();
+    brkLabel = prevB;
+    ctx.t = t;
+    return sw;
+  }
   if (equal(t, "return")) {
     const node = newNode(NodeKind.Return, t);
     if (equal(t.next!, ";")) {

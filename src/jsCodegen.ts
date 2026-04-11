@@ -345,6 +345,10 @@ function emitExpr(
   }
 }
 
+let switchTempId = 0;
+/** Maps C `brkLabel` on a Switch to the JS label on that `switch`; used so `break` exits the switch, never an outer loop. */
+const switchBreakTargets: { brk: string; lab: string }[] = [];
+
 function emitStmt(
   cur: Node | null,
   fn: Obj,
@@ -399,12 +403,61 @@ function emitStmt(
       }
       break;
     }
-    case NodeKind.Break:
-      s += `${indent}break;\n`;
+    case NodeKind.Break: {
+      let lab: string | null = null;
+      const bl = cur.brkLabel;
+      if (bl) {
+        for (let i = switchBreakTargets.length - 1; i >= 0; i--) {
+          if (switchBreakTargets[i]!.brk === bl) {
+            lab = switchBreakTargets[i]!.lab;
+            break;
+          }
+        }
+      }
+      s += lab ? `${indent}break ${lab};\n` : `${indent}break;\n`;
       break;
+    }
     case NodeKind.Continue:
       s += `${indent}continue;\n`;
       break;
+    case NodeKind.Switch: {
+      const blk = cur.body!;
+      const sid = switchTempId++;
+      const v = `_sw${sid}`;
+      const swLab = `__sw${sid}`;
+      const ind2 = indent + "  ";
+      const brk = cur.brkLabel;
+      if (brk) switchBreakTargets.push({ brk, lab: swLab });
+      try {
+        s += `${indent}{\n`;
+        let n: Node | null = blk.body;
+        while (n && n.kind !== NodeKind.Case) {
+          s += emitStmt(n, fn, localJs, layout, globalOffConst, definedFns, ind2, false);
+          n = n.next;
+        }
+        const disc = emitExpr(cur.cond, fn, localJs, layout, globalOffConst, definedFns);
+        s += `${ind2}const ${v} = (${disc});\n`;
+        s += `${ind2}${swLab}: switch (true) {\n`;
+        for (; n && n.kind === NodeKind.Case; n = n.next) {
+          s += `${ind2}  case __rt.eq(${v}, ${n.begin}n):\n`;
+          for (let st = n.body; st; st = st.next)
+            s += emitStmt(st, fn, localJs, layout, globalOffConst, definedFns, ind2 + "    ", false);
+        }
+        if (cur.defaultCase) {
+          s += `${ind2}  default:\n`;
+          let dst: Node | null = cur.defaultCase;
+          while (dst) {
+            s += emitStmt(dst, fn, localJs, layout, globalOffConst, definedFns, ind2 + "    ", false);
+            dst = dst.next;
+          }
+        }
+        s += `${ind2}}\n`;
+        s += `${indent}}\n`;
+      } finally {
+        if (brk) switchBreakTargets.pop();
+      }
+      break;
+    }
     default:
       s += `${indent}/* ${cur.kind} */\n`;
   }
@@ -450,6 +503,7 @@ export function codegen(prog: Obj | null): { source: string; layout: Layout } {
       lines.push(`${localJs.get(l)!} = BigInt(a${i});`);
     }
 
+    switchBreakTargets.length = 0;
     const body = emitStmt(fn.body, fn, localJs, layout, globalOffConst, definedFns, "  ");
     lines.push(body);
     lines.push(`}`);

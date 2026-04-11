@@ -254,6 +254,14 @@ export function addType(node: Node | null): void {
     case NodeKind.Block:
       for (let n = node.body; n; n = n.next) addType(n);
       return;
+    case NodeKind.Switch:
+      addType(node.cond);
+      addType(node.body);
+      for (let d = node.defaultCase; d; d = d.next) addType(d);
+      return;
+    case NodeKind.Case:
+      for (let s = node.body; s; s = s.next) addType(s);
+      return;
     case NodeKind.NullExpr:
       node.ty = tyVoid;
       return;
