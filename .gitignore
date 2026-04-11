@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs and debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / editor noise
+.DS_Store
+
+# TypeScript incremental build
+*.tsbuildinfo
+
+# Local env (secrets)
+.env
+.env.*.local

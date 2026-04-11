@@ -1,0 +1,21 @@
+{
+  "name": "nodec",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript port of C11 compiler for JavaScript runtime",
+  "bin": {
+    "nodec": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "hello": "npm run build && node dist/cli.js run examples/hello.c"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.7.2"
+  }
+}
