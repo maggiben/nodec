@@ -1,4 +1,14 @@
-# nodec
+<div align="center">
+<br>
+<p align="center">
+<img src="docs/nodec.jpg" alt="Nodec" height="124" />
+</p>
+
+<p align="center">
+NodeC — C11 JIT compiler for Node
+</p>
+</div>
+
 
 **nodec** is a C11-oriented compiler implemented in TypeScript. It tokenizes and preprocesses C source, parses it into an internal representation, and emits JavaScript that runs on **Node.js** inside a fresh `vm` context against a **linear memory** model (similar in spirit to Wasm or embedded C, not native code).
 
