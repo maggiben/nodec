@@ -12,7 +12,7 @@
 
 #define WIDTH 80
 #define HEIGHT 25
-#define MAX_ITER 120
+#define MAX_ITER 512
 
 int main() {
   double xd;
