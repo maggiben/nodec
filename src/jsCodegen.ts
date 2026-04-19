@@ -169,7 +169,8 @@ export function layoutProgram(prog: Obj | null): Layout {
     off += g.initData.length;
   }
 
-  const heapBase = alignTo(off, 16);
+  /* Never place the bump heap at offset 0: a successful malloc must not return 0n or C `p == NULL` checks fail. */
+  const heapBase = Math.max(alignTo(off, 16), 16);
   return { memory, globalOff, stringOff, heapBase };
 }
 
@@ -345,6 +346,40 @@ function emitExpr(
   }
 }
 
+/**
+ * C `for`/`while` conditions that already lower to a JavaScript boolean.
+ * Wrapping those in `__rt.truthy` adds a host call per iteration with no semantic benefit.
+ */
+function loopCondSkipsTruthy(n: Node | null): boolean {
+  if (!n) return true;
+  switch (n.kind) {
+    case NodeKind.Lt:
+    case NodeKind.Le:
+    case NodeKind.Eq:
+    case NodeKind.Ne:
+    case NodeKind.LogAnd:
+    case NodeKind.LogOr:
+    case NodeKind.Not:
+      return true;
+    default:
+      return false;
+  }
+}
+
+function emitLoopCond(
+  n: Node | null,
+  fn: Obj,
+  localJs: Map<Obj, string>,
+  layout: Layout,
+  globalOffConst: Map<string, string>,
+  definedFns: Set<string>
+): string {
+  if (!n) return "true";
+  const ex = emitExpr(n, fn, localJs, layout, globalOffConst, definedFns);
+  if (loopCondSkipsTruthy(n)) return ex;
+  return `__rt.truthy(${ex})`;
+}
+
 let switchTempId = 0;
 /** Maps C `brkLabel` on a Switch to the JS label on that `switch`; used so `break` exits the switch, never an outer loop. */
 const switchBreakTargets: { brk: string; lab: string }[] = [];
@@ -387,17 +422,20 @@ function emitStmt(
     case NodeKind.For: {
       const isWhile = !cur.init && !cur.inc;
       if (isWhile) {
-        const condEx = cur.cond ? emitExpr(cur.cond, fn, localJs, layout, globalOffConst, definedFns) : "1n";
-        s += `${indent}while (__rt.truthy(${condEx})) {\n`;
+        const condEx = emitLoopCond(cur.cond, fn, localJs, layout, globalOffConst, definedFns);
+        s += `${indent}while (${condEx}) {\n`;
         s += emitStmt(cur.then, fn, localJs, layout, globalOffConst, definedFns, indent + "  ", false);
         s += `${indent}}\n`;
       } else {
         const initS = cur.init
-          ? emitStmt(cur.init, fn, localJs, layout, globalOffConst, definedFns, "", true).replace(/\n+/g, " ").trim()
+          ? emitStmt(cur.init, fn, localJs, layout, globalOffConst, definedFns, "", true)
+              .replace(/\n+/g, " ")
+              .trim()
+              .replace(/;\s*$/, "")
           : "";
-        const condEx = cur.cond ? emitExpr(cur.cond, fn, localJs, layout, globalOffConst, definedFns) : "1n";
+        const condEx = emitLoopCond(cur.cond, fn, localJs, layout, globalOffConst, definedFns);
         const incEx = cur.inc ? emitExpr(cur.inc, fn, localJs, layout, globalOffConst, definedFns) : "";
-        s += `${indent}for (${initS}; __rt.truthy(${condEx}); ${incEx}) {\n`;
+        s += `${indent}for (${initS}; ${condEx}; ${incEx}) {\n`;
         s += emitStmt(cur.then, fn, localJs, layout, globalOffConst, definedFns, indent + "  ", false);
         s += `${indent}}\n`;
       }

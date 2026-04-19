@@ -113,6 +113,8 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
   let heapPtr = alignTo(heapBase, 16);
   /** POSIX-style PRNG state (glibc-style LCG). */
   let randState = 1;
+  /** One view for the whole linear memory; avoids per-load/store DataView allocation. */
+  const dv = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
   const truthy = (v: unknown) => {
     if (typeof v === "bigint") return v !== 0n;
     if (typeof v === "number") return v !== 0;
@@ -126,20 +128,18 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
 
   const load = (addr: bigint, size: number): bigint => {
     const i = Number(addr);
-    const v = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
     if (size === 1) return BigInt(mem[i]!);
-    if (size === 2) return BigInt(v.getInt16(i, true));
-    if (size === 4) return BigInt(v.getInt32(i, true));
-    return v.getBigUint64(i, true);
+    if (size === 2) return BigInt(dv.getInt16(i, true));
+    if (size === 4) return BigInt(dv.getInt32(i, true));
+    return dv.getBigUint64(i, true);
   };
 
   const store = (addr: bigint, val: bigint, size: number): bigint => {
     const i = Number(addr);
-    const v = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
     if (size === 1) mem[i] = Number(val) & 0xff;
-    else if (size === 2) v.setInt16(i, Number(val), true);
-    else if (size === 4) v.setInt32(i, Number(val), true);
-    else v.setBigUint64(i, val, true);
+    else if (size === 2) dv.setInt16(i, Number(val), true);
+    else if (size === 4) dv.setInt32(i, Number(val), true);
+    else dv.setBigUint64(i, val, true);
     return val;
   };
 
@@ -187,8 +187,7 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     const sec = BigInt(Math.floor(Date.now() / 1000));
     if (timer !== 0n) {
       const i = Number(timer);
-      const v = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
-      if (i >= 0 && i + 8 <= mem.length) v.setBigUint64(i, sec, true);
+      if (i >= 0 && i + 8 <= mem.length) dv.setBigUint64(i, sec, true);
     }
     return sec;
   };

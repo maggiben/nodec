@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "hello": "npm run build && node dist/cli.js run examples/hello.c"
+    "hello": "npm run build && node dist/cli.js run examples/hello.c",
+    "bench": "npm run build && node scripts/bench-vs-js.mjs"
   },
   "engines": {
     "node": ">=18"
