@@ -309,6 +309,13 @@ function emitExpr(
       if (name === "rand") return `__rt.rand()`;
       if (name === "time") return `__rt.time(${args.join(", ")})`;
       if (name === "sleep") return `__rt.sleep(${args.join(", ")})`;
+      if (name === "fopen") return `__rt.fopen(${args.join(", ")})`;
+      if (name === "fclose") return `__rt.fclose(${args.join(", ")})`;
+      if (name === "fread") return `__rt.fread(${args.join(", ")})`;
+      if (name === "fwrite") return `__rt.fwrite(${args.join(", ")})`;
+      if (name === "fseek") return `__rt.fseek(${args.join(", ")})`;
+      if (name === "ftell") return `__rt.ftell(${args.join(", ")})`;
+      if (name === "fflush") return `__rt.fflush(${args.join(", ")})`;
       if (definedFns.has(name)) return `${jsIdent("fn_" + name)}(${args.join(", ")})`;
       return `__rt.call(${JSON.stringify(name)}, [${args.join(", ")}])`;
     }

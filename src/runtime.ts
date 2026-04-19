@@ -2,6 +2,13 @@
  * Isolated execution: compile emitted JS with vm, expose I/O via host hooks.
  */
 
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readSync,
+  writeSync,
+} from "node:fs";
 import vm from "node:vm";
 import type { Layout } from "./jsCodegen.js";
 
@@ -171,6 +178,178 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     return 0n;
   };
 
+  /** Host-backed FILE* slots: first u32 LE at FILE* is slot id; second u32 is magic 0x46494c45 ('FILE'). */
+  type FileSlot = { fd: number; pos: number };
+  const fileSlots = new Map<number, FileSlot>();
+  let nextFileSlotId = 1;
+
+  const readFileSlotId = (stream: bigint): number | null => {
+    const i = Number(stream);
+    if (i <= 0 || i + 8 > mem.length) return null;
+    const id = dv.getUint32(i, true);
+    const magic = dv.getUint32(i + 4, true);
+    if (magic !== 0x46494c45) return null;
+    if (!fileSlots.has(id)) return null;
+    return id;
+  };
+
+  const mapOpenMode = (modeRaw: string): string | null => {
+    const m = modeRaw.trim().toLowerCase();
+    if (m === "r" || m === "rb" || m === "rt") return "r";
+    if (m === "r+" || m === "rb+" || m === "r+b" || m === "r+t") return "r+";
+    if (m === "w" || m === "wb" || m === "wt") return "w";
+    if (m === "w+" || m === "wb+" || m === "w+b" || m === "w+t") return "w+";
+    if (m === "a" || m === "ab" || m === "at") return "a";
+    if (m === "a+" || m === "ab+" || m === "a+b" || m === "a+t") return "a+";
+    return null;
+  };
+
+  const fopen = (pathAddr: bigint, modeAddr: bigint) => {
+    const path = readCString(mem, pathAddr);
+    const mode = readCString(mem, modeAddr);
+    const flags = mapOpenMode(mode);
+    if (!flags) {
+      hooks.log(`[nodec] fopen: unsupported mode ${JSON.stringify(mode)}`);
+      return 0n;
+    }
+    let fd: number;
+    try {
+      fd = openSync(path, flags);
+    } catch (e) {
+      hooks.log(`[nodec] fopen: ${e instanceof Error ? e.message : String(e)}`);
+      return 0n;
+    }
+    const id = nextFileSlotId++;
+    let pos = 0;
+    if (flags === "a" || flags === "a+") {
+      try {
+        pos = fstatSync(fd).size;
+      } catch {
+        pos = 0;
+      }
+    }
+    fileSlots.set(id, { fd, pos });
+    const slotPtr = malloc(8n);
+    if (slotPtr === 0n) {
+      closeSync(fd);
+      fileSlots.delete(id);
+      return 0n;
+    }
+    const off = Number(slotPtr);
+    dv.setUint32(off, id >>> 0, true);
+    dv.setUint32(off + 4, 0x46494c45, true);
+    return slotPtr;
+  };
+
+  const fclose = (stream: bigint) => {
+    const id = readFileSlotId(stream);
+    if (id === null) return -1n;
+    const slot = fileSlots.get(id)!;
+    try {
+      closeSync(slot.fd);
+    } catch {
+      /* ignore */
+    }
+    fileSlots.delete(id);
+    return 0n;
+  };
+
+  const fread = (ptr: bigint, size: bigint, nmemb: bigint, stream: bigint) => {
+    const id = readFileSlotId(stream);
+    if (id === null) return 0n;
+    const slot = fileSlots.get(id)!;
+    const sz = Number(size);
+    const n = Number(nmemb);
+    if (sz <= 0 || n <= 0) return 0n;
+    let totalBytes = sz * n;
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0) return 0n;
+    totalBytes = Math.min(totalBytes, 64 * 1024 * 1024);
+    const p = Number(ptr);
+    if (p < 0 || p >= mem.length) return 0n;
+    totalBytes = Math.min(totalBytes, mem.length - p);
+    let got = 0;
+    while (got < totalBytes) {
+      const chunk = Math.min(65536, totalBytes - got);
+      const buf = Buffer.alloc(chunk);
+      let br: number;
+      try {
+        br = readSync(slot.fd, buf, 0, chunk, slot.pos);
+      } catch {
+        return BigInt(Math.trunc(got / sz));
+      }
+      if (br <= 0) break;
+      mem.set(buf.subarray(0, br), p + got);
+      slot.pos += br;
+      got += br;
+      if (br < chunk) break;
+    }
+    return BigInt(Math.trunc(got / sz));
+  };
+
+  const fwrite = (ptr: bigint, size: bigint, nmemb: bigint, stream: bigint) => {
+    const id = readFileSlotId(stream);
+    if (id === null) return 0n;
+    const slot = fileSlots.get(id)!;
+    const sz = Number(size);
+    const n = Number(nmemb);
+    if (sz <= 0 || n <= 0) return 0n;
+    let totalBytes = sz * n;
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0) return 0n;
+    totalBytes = Math.min(totalBytes, 64 * 1024 * 1024);
+    const p = Number(ptr);
+    if (p < 0 || p >= mem.length) return 0n;
+    totalBytes = Math.min(totalBytes, mem.length - p);
+    let sent = 0;
+    while (sent < totalBytes) {
+      const chunk = Math.min(65536, totalBytes - sent);
+      const slice = mem.subarray(p + sent, p + sent + chunk);
+      const buf = Buffer.from(slice);
+      let bw: number;
+      try {
+        bw = writeSync(slot.fd, buf, 0, chunk, slot.pos);
+      } catch {
+        return BigInt(Math.trunc(sent / sz));
+      }
+      if (bw <= 0) break;
+      slot.pos += bw;
+      sent += bw;
+      if (bw < chunk) break;
+    }
+    return BigInt(Math.trunc(sent / sz));
+  };
+
+  const fseek = (stream: bigint, offset: bigint, whence: bigint) => {
+    const id = readFileSlotId(stream);
+    if (id === null) return -1n;
+    const slot = fileSlots.get(id)!;
+    const w = Number(whence);
+    const off = Number(offset);
+    if (!Number.isFinite(off)) return -1n;
+    try {
+      if (w === 0) slot.pos = Math.max(0, Math.trunc(off));
+      else if (w === 1) slot.pos = Math.max(0, slot.pos + Math.trunc(off));
+      else if (w === 2) {
+        const st = fstatSync(slot.fd);
+        slot.pos = Math.max(0, st.size + Math.trunc(off));
+      } else return -1n;
+    } catch {
+      return -1n;
+    }
+    return 0n;
+  };
+
+  const ftell = (stream: bigint) => {
+    const id = readFileSlotId(stream);
+    if (id === null) return -1n;
+    return BigInt(fileSlots.get(id)!.pos);
+  };
+
+  const fflush = (stream: bigint) => {
+    if (stream === 0n) return 0n;
+    if (readFileSlotId(stream) === null) return -1n;
+    return 0n;
+  };
+
   const srand = (seed: bigint) => {
     const s = Number(seed) >>> 0;
     randState = s === 0 ? 1 : s;
@@ -244,6 +423,13 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     rand,
     time,
     sleep,
+    fopen,
+    fclose,
+    fread,
+    fwrite,
+    fseek,
+    ftell,
+    fflush,
     call,
     member,
     addr: () => 0n,

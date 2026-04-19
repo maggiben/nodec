@@ -18,3 +18,6 @@ yarn-error.log*
 # Local env (secrets)
 .env
 .env.*.local
+
+# examples/file_io.c scratch output
+examples/.nodec_file_io_scratch.txt
