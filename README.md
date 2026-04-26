@@ -87,6 +87,9 @@ The `include/` directory provides minimal declarations. Implementations live in 
 |-------------|----------|
 | `printf` | Subset of `printf`; see [printf format specifiers](#printf-format-specifiers). Output is sent to the host `log` hook. |
 | `sprintf` | Writes formatted UTF-8 bytes plus a NUL terminator into your buffer; returns length excluding NUL (or `0` on error). |
+| `fopen` / `fclose` | Host-backed stream handles (`void *` in headers, FILE-like semantics) for local filesystem paths. |
+| `fread` / `fwrite` | Binary-safe reads/writes against host files; return item counts (not raw bytes), matching C conventions. |
+| `fseek` / `ftell` / `fflush` | Stream position management with `SEEK_SET` / `SEEK_CUR` / `SEEK_END`; `fflush` validates stream handle. |
 | `malloc` | Bump pointer allocator; pointers are stable for the lifetime of one VM run. |
 | `free` | No-op (heap is not reused in-process). |
 | `srand` / `rand` | POSIX-style PRNG state (LCG-style). |
@@ -142,6 +145,7 @@ const { exitCode } = runCompiled("/path/to/app.c", {
 | `examples/minimal.c` | Empty `main`, forward-declared `printf`. |
 | `examples/hello.c` | Macros, `malloc` / `sprintf` / `printf` / `free`, `while`, `break`, `sleep`. |
 | `examples/dice.c` | `time`, `srand`, `rand`, loops, formatted output. |
+| `examples/file_io.c` | Host-backed file I/O: `fopen`, `fwrite`, `fread`, `fseek`, `ftell`, `fclose`. |
 | `examples/numbers.c` | `double` and `%f`. |
 | `examples/pointers_structs.c` | Pointers, structs, `->`, nested members, heap arrays; includes practical notes in comments. |
 
@@ -168,6 +172,7 @@ The frontend is built around C11 ideas, but the **JS backend intentionally suppo
 - **Structs on the stack**, **passing structs by value**, and **large stack arrays** can be limited or fragile; the `pointers_structs.c` comment recommends keeping structs on the **heap** via `malloc` for reliable behavior.
 - **Heap**: single bump arena per run; **`free` does not recycle** memory.
 - **Memory size**: fixed **1 MiB** linear memory; overrun returns `0` from `malloc`.
+- **File I/O model**: streams are host-backed handles created by `fopen`; they are not full libc `FILE*` implementations and currently cover `fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`/`fflush`.
 - **Statements / expressions** that parse but are **not lowered** in the current codegen may become no-ops or wrong values (e.g. unimplemented expression kinds may compile to `0n`; unsupported statements may emit placeholder comments). Prefer the constructs used in `examples/`.
 - **No native object files or linking** of arbitrary `.o` libraries—only this compiler + runtime.
 
