@@ -155,6 +155,10 @@ Run any of them with:
 node dist/cli.js run examples/<name>.c
 ```
 
+Example output from `examples/mandelbrot.c`:
+
+![Mandelbrot ASCII output](docs/mandelbrot-example.png)
+
 ## Practical limits (JavaScript backend)
 
 The frontend is built around C11 ideas, but the **JS backend intentionally supports a subset** suitable for demos and small programs.
