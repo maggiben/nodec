@@ -3,7 +3,7 @@ import { runCompiled, compileFile, defaultIncludePaths } from "./compile.js";
 import { readSync } from "node:fs";
 import { resolve } from "node:path";
 
-/** Blocking read of one line from fd 0 (for scanf in the VM). */
+/** Blocking read of one line from stdin (fd 0) for the `run` command's scanf hook. */
 function readLineSync(): string {
   const chunks: number[] = [];
   const buf = Buffer.alloc(1);
@@ -26,6 +26,7 @@ function readLineSync(): string {
 
 const argv = process.argv.slice(2);
 
+/** Prints CLI help and exits with status 1. */
 function usage(): never {
   console.error(`nodec — TypeScript C compiler (JS backend)
 Usage:

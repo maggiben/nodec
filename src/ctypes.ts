@@ -218,6 +218,7 @@ export type Type = {
   isComplete: boolean;
 };
 
+/** Allocates a complete {@link Type} shell with default fields for the given kind/size/align. */
 function newType(kind: TypeKind, size: number, align: number): Type {
   return {
     kind,
@@ -266,10 +267,12 @@ export const tyFloat = newType(TypeKind.Float, 4, 4);
 export const tyDouble = newType(TypeKind.Double, 8, 8);
 export const tyLdouble = newType(TypeKind.LDouble, 16, 16);
 
+/** Shallow copy tagged with `origin` pointing at the canonical type (typedef decay). */
 export function copyType(ty: Type): Type {
   return { ...ty, origin: ty };
 }
 
+/** Pointer type `T *` with platform pointer size/align. */
 export function pointerTo(base: Type): Type {
   const ty = newType(TypeKind.Ptr, 8, 8);
   ty.base = base;
@@ -277,12 +280,17 @@ export function pointerTo(base: Type): Type {
   return ty;
 }
 
+/** Incomplete function type; attach `params` and `isVariadic` separately. */
 export function funcType(returnTy: Type): Type {
   const ty = newType(TypeKind.Func, 1, 1);
   ty.returnTy = returnTy;
   return ty;
 }
 
+/**
+ * Array type `base[len]`; `len < 0` means incomplete (unknown length, size 0 here).
+ * @param len Element count, or negative for `[]`.
+ */
 export function arrayOf(base: Type, len: number): Type {
   const sz = len < 0 ? 0 : base.size * len;
   const ty = newType(TypeKind.Array, sz, base.align);
@@ -291,16 +299,19 @@ export function arrayOf(base: Type, len: number): Type {
   return ty;
 }
 
+/** Enum type placeholder (values stored as int-sized in this compiler). */
 export function enumType(): Type {
   return newType(TypeKind.Enum, 4, 4);
 }
 
+/** Incomplete struct type until members are parsed. */
 export function structType(): Type {
   const ty = newType(TypeKind.Struct, 0, 1);
   ty.isComplete = false;
   return ty;
 }
 
+/** Incomplete union type until members are parsed. */
 export function unionType(): Type {
   const ty = newType(TypeKind.Union, 0, 1);
   ty.isComplete = false;

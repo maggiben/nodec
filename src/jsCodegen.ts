@@ -5,16 +5,19 @@
 import { type Node, type Obj, type Type, NodeKind, TypeKind, tyChar } from "./ctypes.js";
 import { addType } from "./typeops.js";
 
+/** Rounds `n` up to a multiple of `a` (rodata / global layout). */
 function alignTo(n: number, a: number): number {
   return Math.floor((n + a - 1) / a) * a;
 }
 
+/** Parameter name from a function type's param `Type.name` token, if any. */
 function getParamIdent(t: Type): string | null {
   if (!t.name) return null;
   const tok = t.name;
   return tok.file.contents.slice(tok.loc, tok.loc + tok.len);
 }
 
+/** Ordered `Obj` parameters matching the function type's param list (for prologue emission). */
 function paramsInOrder(fn: Obj): Obj[] {
   const types: Type[] = [];
   for (let p = fn.ty.params; p; p = p.next) types.push(p);
@@ -30,6 +33,7 @@ function paramsInOrder(fn: Obj): Obj[] {
   return out;
 }
 
+/** Runs type inference on one function body before codegen. */
 function addTypesFn(fn: Obj): void {
   if (fn.body) addType(fn.body);
 }
@@ -94,12 +98,16 @@ type ScanfTarget =
   | { k: "local"; js: string }
   | { k: "mem"; ptr: string; size: number };
 
+/** Size in bytes of the type `ptrNode` points to (default 4 if unknown). */
 function pointeeSize(ptrNode: Node): number {
   const t = ptrNode.ty;
   if (t?.kind === TypeKind.Ptr && t.base) return t.base.size;
   return 4;
 }
 
+/**
+ * Decides whether a `scanf` argument is a stack local (assign in JS) or linear-memory store.
+ */
 function classifyScanfPtr(
   ptrArg: Node,
   fn: Obj,
@@ -122,6 +130,7 @@ function classifyScanfPtr(
   };
 }
 
+/** Emits an IIFE that parses stdin via `__rt.scanfParsed` and assigns each target. */
 function emitScanfCall(
   n: Node,
   fn: Obj,
@@ -145,6 +154,9 @@ function emitScanfCall(
   return `((() => { const _s = __rt.scanfParsed(${fmtJs}); ${assigns} return BigInt(_s.length); })())`;
 }
 
+/**
+ * Lays out globals and string literals in a 1 MiB linear `memory` image; returns `heapBase` for malloc.
+ */
 export function layoutProgram(prog: Obj | null): Layout {
   const memory = new Uint8Array(1024 * 1024);
   let off = 0;
@@ -174,6 +186,9 @@ export function layoutProgram(prog: Obj | null): Layout {
   return { memory, globalOff, stringOff, heapBase };
 }
 
+/**
+ * Emits a JavaScript expression string evaluating the AST node (BigInt for integers, number for float literals).
+ */
 function emitExpr(
   n: Node | null,
   fn: Obj,
@@ -391,6 +406,9 @@ let switchTempId = 0;
 /** Maps C `brkLabel` on a Switch to the JS label on that `switch`; used so `break` exits the switch, never an outer loop. */
 const switchBreakTargets: { brk: string; lab: string }[] = [];
 
+/**
+ * Emits JavaScript statements for a statement list; `chain` follows `next` for sequential stmts.
+ */
 function emitStmt(
   cur: Node | null,
   fn: Obj,
@@ -510,6 +528,9 @@ function emitStmt(
   return s;
 }
 
+/**
+ * Lowers the whole program: every defined function becomes `fn_<name>(a0,…)` plus `return { … }` export object.
+ */
 export function codegen(prog: Obj | null): { source: string; layout: Layout } {
   for (let g = prog; g; g = g.next) if (g.isFunction) addTypesFn(g);
 

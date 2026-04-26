@@ -1,6 +1,6 @@
 /**
  * Recursive-descent parser.
- * Covers a large C11 subset suitable for real small programs;.
+ * Covers a large C11 subset suitable for real small programs.
  */
 
 import {
@@ -59,15 +59,18 @@ type VarAttr = {
   align: number;
 };
 
+/** Rounds `n` up to the next multiple of `align` (struct member layout). */
 function alignTo(n: number, align: number): number {
   return Math.floor((n + align - 1) / align) * align;
 }
 
+/** Lexeme of an identifier token; errors if `tok` is not {@link TokenKind.Ident}. */
 function getIdent(tok: Token): string {
   if (tok.kind !== TokenKind.Ident) errorTok(tok, "expected an identifier");
   return tok.file.contents.slice(tok.loc, tok.loc + tok.len);
 }
 
+/** Allocates a zeroed {@link Node} shell of the given kind. */
 function newNode(kind: NodeKind, tok: Token | null): Node {
   return {
     kind,
@@ -108,12 +111,14 @@ function newNode(kind: NodeKind, tok: Token | null): Node {
   };
 }
 
+/** Integer literal AST node. */
 function newNum(val: bigint, tok: Token | null): Node {
   const n = newNode(NodeKind.Num, tok);
   n.val = val;
   return n;
 }
 
+/** Binary operator or assignment node. */
 function newBinary(kind: NodeKind, lhs: Node, rhs: Node, tok: Token | null): Node {
   const n = newNode(kind, tok);
   n.lhs = lhs;
@@ -121,6 +126,7 @@ function newBinary(kind: NodeKind, lhs: Node, rhs: Node, tok: Token | null): Nod
   return n;
 }
 
+/** Unary operator node (`lhs` holds the operand). */
 function newUnary(kind: NodeKind, expr: Node, tok: Token | null): Node {
   const n = newNode(kind, tok);
   n.lhs = expr;
@@ -135,15 +141,18 @@ let brkLabel: string | null = null;
 let contLabel: string | null = null;
 let labelId = 0;
 
+/** Pushes an inner lexical scope for locals, typedefs, and tags. */
 function enterScope(): void {
   scope = { next: scope, vars: new Map(), tags: new Map() };
 }
 
+/** Pops the innermost scope (must not pop the translation-unit root). */
 function leaveScope(): void {
   if (!scope.next) errorTok(null as unknown as Token, "internal scope error");
   scope = scope.next!;
 }
 
+/** Looks up `name` for variable, typedef, or enumerator binding. */
 function findVar(name: string): VarScope | null {
   for (let sc: Scope | null = scope; sc; sc = sc.next) {
     const v = sc.vars.get(name);
@@ -152,6 +161,7 @@ function findVar(name: string): VarScope | null {
   return null;
 }
 
+/** Looks up struct/union/enum tag `name` in the scope chain. */
 function findTag(name: string): Type | null {
   for (let sc: Scope | null = scope; sc; sc = sc.next) {
     const t = sc.tags.get(name);
@@ -160,16 +170,19 @@ function findTag(name: string): Type | null {
   return null;
 }
 
+/** Inserts a fresh {@link VarScope} entry for `name` in the current scope. */
 function pushScopeVar(name: string): VarScope {
   const vs: VarScope = { var: null, typeDef: null, enumTy: null, enumVal: 0 };
   scope.vars.set(name, vs);
   return vs;
 }
 
+/** Binds aggregate tag `name` to incomplete or complete type `ty`. */
 function pushTag(name: string, ty: Type): void {
   scope.tags.set(name, ty);
 }
 
+/** Declares a symbol in the current scope table (not yet linked as local/global). */
 function newVar(name: string, ty: Type, tok: Token | null): Obj {
   const vs = pushScopeVar(name);
   const v: Obj = {
@@ -202,6 +215,7 @@ function newVar(name: string, ty: Type, tok: Token | null): Obj {
   return v;
 }
 
+/** Stack-local variable for the current function (`locals` list head). */
 function newLvar(name: string, ty: Type, tok: Token | null): Obj {
   const v = newVar(name, ty, tok);
   v.isLocal = true;
@@ -210,6 +224,7 @@ function newLvar(name: string, ty: Type, tok: Token | null): Obj {
   return v;
 }
 
+/** File-scope object (function, global, or static); prepended to `globals`. */
 function newGvar(name: string, ty: Type): Obj {
   const vs = pushScopeVar(name);
   const v: Obj = {
@@ -243,14 +258,17 @@ function newGvar(name: string, ty: Type): Obj {
   return v;
 }
 
+/** Fresh internal name for string literals, anon symbols, and break labels. */
 function newUniqueName(): string {
   return `.L.${labelId++}`;
 }
 
+/** Anonymous global with internal `.L.*` name. */
 function newAnonGvar(ty: Type): Obj {
   return newGvar(newUniqueName(), ty);
 }
 
+/** Read-only global holding string literal bytes plus trailing zero. */
 function newStringLiteral(bytes: Uint8Array, ty: Type): Obj {
   const v = newAnonGvar(ty);
   const buf = new Uint8Array(bytes.length + 1);
@@ -259,12 +277,18 @@ function newStringLiteral(bytes: Uint8Array, ty: Type): Obj {
   return v;
 }
 
+/** Expression node that loads object `v`. */
 function newVarNode(v: Obj, tok: Token | null): Node {
   const n = newNode(NodeKind.Var, tok);
   n.var = v;
   return n;
 }
 
+/**
+ * Parses one translation unit from preprocessor output into a linked list of {@link Obj} globals/functions.
+ * @param tok First token; advances through {@link TokenKind.Eof}.
+ * @returns Head of `globals`, or `null` if the file was empty of declarations.
+ */
 export function parse(tok: Token | null): Obj | null {
   locals = null;
   globals = null;
@@ -295,6 +319,7 @@ export function parse(tok: Token | null): Obj | null {
   return globals;
 }
 
+/** Drops tentative definitions superseded by a real definition; compacts the `globals` list. */
 function scanGlobals(): void {
   const seen = new Map<string, Obj>();
   let cur: Obj | null = null;
@@ -326,6 +351,7 @@ function scanGlobals(): void {
   globals = head;
 }
 
+/** True if `tok` can start a declaration-specifier (type name or typedef). */
 function isTypename(tok: Token | null): boolean {
   if (!tok) return false;
   if (tok.kind === TokenKind.Keyword) {
@@ -364,6 +390,10 @@ function isTypename(tok: Token | null): boolean {
   return false;
 }
 
+/**
+ * Parses declaration specifiers (storage class, type, qualifiers); updates `ctx.t` past consumed tokens.
+ * @param attr Receives typedef/static/extern/etc.; may be null in type-only contexts.
+ */
 function declspec(ctx: { t: Token | null }, tok: Token, attr: VarAttr | null): Type {
   enum C {
     VOID = 1 << 0,
@@ -536,6 +566,7 @@ function declspec(ctx: { t: Token | null }, tok: Token, attr: VarAttr | null): T
   return ty;
 }
 
+/** `typeof` on a type name or unary expression; yields the operand's type. */
 function typeofSpecifier(ctx: { t: Token | null }, tok: Token): Type {
   if (equal(tok, "(") && isTypename(tok.next)) {
     const ty = typename(ctx, tok.next!);
@@ -548,6 +579,7 @@ function typeofSpecifier(ctx: { t: Token | null }, tok: Token): Type {
   return node.ty!;
 }
 
+/** Parses `enum` with optional tag and enumerator list; registers constants in scope. */
 function enumSpecifier(ctx: { t: Token | null }, tok: Token): Type {
   const ty = enumType();
   let tag: string | null = null;
@@ -591,6 +623,7 @@ function enumSpecifier(ctx: { t: Token | null }, tok: Token): Type {
   return ty;
 }
 
+/** Shared parser for `struct` or `union` definitions and forward declarations. */
 function structUnionDecl(ctx: { t: Token | null }, tok: Token, kind: TypeKind.Struct | TypeKind.Union): Type {
   const ty = kind === TypeKind.Struct ? structType() : unionType();
   ty.kind = kind;
@@ -691,19 +724,23 @@ function structUnionDecl(ctx: { t: Token | null }, tok: Token, kind: TypeKind.St
   return ty;
 }
 
+/** Parses a `struct` type. */
 function structDecl(ctx: { t: Token | null }, tok: Token): Type {
   return structUnionDecl(ctx, tok, TypeKind.Struct);
 }
 
+/** Parses a `union` type. */
 function unionDecl(ctx: { t: Token | null }, tok: Token): Type {
   return structUnionDecl(ctx, tok, TypeKind.Union);
 }
 
+/** Type name in contexts like `sizeof(int)` or casts: specifiers plus abstract declarator. */
 function typename(ctx: { t: Token | null }, tok: Token): Type {
   const ty = declspec(ctx, tok, null);
   return abstractDeclarator(ctx, ctx.t!, ty);
 }
 
+/** Parses `(void)` or `(T1, T2, ...)` parameter list and builds a {@link TypeKind.Func} type. */
 function funcParams(ctx: { t: Token | null }, tok: Token, ret: Type): Type {
   let t = tok;
   if (equal(t, "void") && equal(t.next!, ")")) {
@@ -749,6 +786,7 @@ function funcParams(ctx: { t: Token | null }, tok: Token, ret: Type): Type {
   return fn;
 }
 
+/** Array declarator `[n]` or `[]` with optional static/restrict noise. */
 function arrayDimensions(ctx: { t: Token | null }, tok: Token, base: Type): Type {
   let t = tok;
   while (equal(t, "static") || equal(t, "restrict")) t = t.next!;
@@ -763,6 +801,7 @@ function arrayDimensions(ctx: { t: Token | null }, tok: Token, base: Type): Type
   return arrayOf(ty, n);
 }
 
+/** Applies function or array suffixes after the base type in a declarator. */
 function typeSuffix(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   let t = tok;
   if (equal(t, "(")) return funcParams(ctx, t.next!, ty);
@@ -771,6 +810,7 @@ function typeSuffix(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   return ty;
 }
 
+/** Consumes `*` and pointer qualifiers, wrapping `ty` in {@link TypeKind.Ptr}. */
 function pointers(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   let t = tok;
   while (t && equal(t, "*")) {
@@ -790,6 +830,7 @@ function pointers(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   return ty;
 }
 
+/** Full declarator: pointers, optional parenthesized inner declarator, suffixes, and identifier. */
 function declarator(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   ty = pointers(ctx, tok, ty);
   let t = ctx.t!;
@@ -813,6 +854,7 @@ function declarator(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   return ty;
 }
 
+/** Declarator without requiring an identifier (sizeof, casts, abstract params). */
 function abstractDeclarator(ctx: { t: Token | null }, tok: Token, ty: Type): Type {
   ty = pointers(ctx, tok, ty);
   let t = ctx.t!;
@@ -827,6 +869,7 @@ function abstractDeclarator(ctx: { t: Token | null }, tok: Token, ty: Type): Typ
   return typeSuffix(ctx, t, ty);
 }
 
+/** Parses one or more typedef declarators until `;`. */
 function parseTypedef(ctx: { t: Token | null }, tok: Token, basety: Type): Token | null {
   ctx.t = tok;
   let first = true;
@@ -845,6 +888,7 @@ function parseTypedef(ctx: { t: Token | null }, tok: Token, basety: Type): Token
   return ctx.t;
 }
 
+/** True if tokens starting at `tok` form a function declarator vs variable declaration. */
 function isFunction(tok: Token): boolean {
   if (equal(tok, ";")) return false;
   const ctx = { t: tok as Token | null };
@@ -853,6 +897,7 @@ function isFunction(tok: Token): boolean {
   return ty.kind === TypeKind.Func;
 }
 
+/** Creates stack slots for each formal parameter type in declaration order. */
 function createParamLvars(param: Type | null): void {
   if (!param) return;
   createParamLvars(param.next);
@@ -860,6 +905,7 @@ function createParamLvars(param: Type | null): void {
   newLvar(getIdent(param.name), param, param.name);
 }
 
+/** Looks up file-scope function symbol by name (outermost scope only). */
 function findFunc(name: string): Obj | null {
   let sc: Scope | null = scope;
   while (sc?.next) sc = sc.next;
@@ -868,6 +914,7 @@ function findFunc(name: string): Obj | null {
   return null;
 }
 
+/** Parses a function declaration or definition: prototype, body, params, labels. */
 function parseFunction(ctx: { t: Token | null }, tok: Token, basety: Type, attr: VarAttr): Token | null {
   const ty = declarator(ctx, tok, basety);
   let t = ctx.t!;
@@ -907,10 +954,12 @@ function parseFunction(ctx: { t: Token | null }, tok: Token, basety: Type, attr:
   return t;
 }
 
+/** Placeholder for forward goto resolution (unsupported in JS backend). */
 function resolveLabels(_n: Node | null): void {
   /* goto unsupported in js backend for now */
 }
 
+/** Parses file-scope variables with optional initializers and tentative defs. */
 function globalVariable(ctx: { t: Token | null }, tok: Token, basety: Type, attr: VarAttr): Token | null {
   ctx.t = tok;
   let first = true;
@@ -959,6 +1008,7 @@ function globalVariable(ctx: { t: Token | null }, tok: Token, basety: Type, attr
   return ctx.t;
 }
 
+/** `{ ... }` block: declarations and statements until `}`; manages scope. */
 function compoundStmt(ctx: { t: Token | null }, tok: Token): Node | null {
   const node = newNode(NodeKind.Block, tok);
   enterScope();
@@ -993,6 +1043,7 @@ function compoundStmt(ctx: { t: Token | null }, tok: Token): Node | null {
   return node;
 }
 
+/** Local declaration line (possibly multiple declarators) inside a block. */
 function declaration(ctx: { t: Token | null }, tok: Token): Node | null {
   const attr: VarAttr = {
     isTypedef: false,
@@ -1042,6 +1093,9 @@ function declaration(ctx: { t: Token | null }, tok: Token): Node | null {
   return head;
 }
 
+/**
+ * Statement parser: compound, selection, iteration, switch, jump, or expression statement.
+ */
 function stmt(ctx: { t: Token | null }, tok: Token): Node | null {
   let t = tok;
   if (equal(t, "{")) return compoundStmt(ctx, t.next!);
@@ -1236,6 +1290,7 @@ function stmt(ctx: { t: Token | null }, tok: Token): Node | null {
   return exprStmt(ctx, t);
 }
 
+/** Expression followed by `;` (optional empty becomes null expr in caller patterns). */
 function exprStmt(ctx: { t: Token | null }, tok: Token): Node | null {
   const node = newNode(NodeKind.ExprStmt, tok);
   node.lhs = expr(ctx, tok);
@@ -1244,10 +1299,12 @@ function exprStmt(ctx: { t: Token | null }, tok: Token): Node | null {
   return node;
 }
 
+/** Top-level expression: comma is lowest parsed here (delegates to assign). */
 function expr(ctx: { t: Token | null }, tok: Token): Node {
   return assign(ctx, tok);
 }
 
+/** Assignment expression (`=` only at this precedence level). */
 function assign(ctx: { t: Token | null }, tok: Token): Node {
   let node = logor(ctx, tok);
   let t = ctx.t!;
@@ -1259,6 +1316,7 @@ function assign(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Logical OR (`||`). */
 function logor(ctx: { t: Token | null }, tok: Token): Node {
   let node = logand(ctx, tok);
   let t = ctx.t!;
@@ -1270,6 +1328,7 @@ function logor(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Logical AND (`&&`). */
 function logand(ctx: { t: Token | null }, tok: Token): Node {
   let node = bitor(ctx, tok);
   let t = ctx.t!;
@@ -1281,6 +1340,7 @@ function logand(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Bitwise inclusive OR. */
 function bitor(ctx: { t: Token | null }, tok: Token): Node {
   let node = bitxor(ctx, tok);
   let t = ctx.t!;
@@ -1292,6 +1352,7 @@ function bitor(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Bitwise XOR. */
 function bitxor(ctx: { t: Token | null }, tok: Token): Node {
   let node = bitand(ctx, tok);
   let t = ctx.t!;
@@ -1303,6 +1364,7 @@ function bitxor(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Bitwise AND. */
 function bitand(ctx: { t: Token | null }, tok: Token): Node {
   let node = equality(ctx, tok);
   let t = ctx.t!;
@@ -1314,6 +1376,7 @@ function bitand(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** `==` and `!=`. */
 function equality(ctx: { t: Token | null }, tok: Token): Node {
   let node = relational(ctx, tok);
   let t = ctx.t!;
@@ -1330,6 +1393,7 @@ function equality(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Relational and ordering operators (`<` `>` `<=` `>=`). */
 function relational(ctx: { t: Token | null }, tok: Token): Node {
   let node = add(ctx, tok);
   let t = ctx.t!;
@@ -1352,6 +1416,7 @@ function relational(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Additive `+` / `-` with pointer arithmetic lowering. */
 function add(ctx: { t: Token | null }, tok: Token): Node {
   let node = mul(ctx, tok);
   let t = ctx.t!;
@@ -1368,6 +1433,7 @@ function add(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Builds Add node, inserting casts for pointer + integer forms. */
 function newAdd(lhs: Node, rhs: Node, tok: Token | null): Node {
   addType(lhs);
   addType(rhs);
@@ -1378,6 +1444,7 @@ function newAdd(lhs: Node, rhs: Node, tok: Token | null): Node {
   return newBinary(NodeKind.Add, lhs, rhs, tok);
 }
 
+/** Builds Sub node (pointer minus integer, or arithmetic sub). */
 function newSub(lhs: Node, rhs: Node, tok: Token | null): Node {
   addType(lhs);
   addType(rhs);
@@ -1386,6 +1453,7 @@ function newSub(lhs: Node, rhs: Node, tok: Token | null): Node {
   return newBinary(NodeKind.Sub, lhs, rhs, tok);
 }
 
+/** Multiplicative `*` `/` `%`. */
 function mul(ctx: { t: Token | null }, tok: Token): Node {
   let node = unary(ctx, tok);
   let t = ctx.t!;
@@ -1405,6 +1473,7 @@ function mul(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Unary operators, `sizeof`, and delegation to postfix. */
 function unary(ctx: { t: Token | null }, tok: Token): Node {
   let t = tok;
   if (equal(t, "+")) return unary(ctx, t.next!);
@@ -1435,6 +1504,7 @@ function unary(ctx: { t: Token | null }, tok: Token): Node {
   return postfix(ctx, t);
 }
 
+/** Casts `(type)` or falls through to unary/postfix. */
 function cast(ctx: { t: Token | null }, tok: Token): Node {
   let t = tok;
   if (equal(t, "(") && isTypename(t.next)) {
@@ -1446,6 +1516,7 @@ function cast(ctx: { t: Token | null }, tok: Token): Node {
   return postfix(ctx, t);
 }
 
+/** Postfix chain: calls, subscript, `.` and `->`. */
 function postfix(ctx: { t: Token | null }, tok: Token): Node {
   let node = primary(ctx, tok);
   let t = ctx.t!;
@@ -1480,6 +1551,7 @@ function postfix(ctx: { t: Token | null }, tok: Token): Node {
   return node;
 }
 
+/** Finds member `name` on struct/union type `ty`. */
 function getStructMember(ty: Type, name: string): Member | null {
   for (let m = ty.members; m; m = m.next) {
     if (m.name === name) return m;
@@ -1487,6 +1559,7 @@ function getStructMember(ty: Type, name: string): Member | null {
   return null;
 }
 
+/** Builds Member node for `.field` / `->field` after type-checking aggregate. */
 function structRef(node: Node, tok: Token): Node {
   addType(node);
   const ty = node.ty!;
@@ -1499,6 +1572,7 @@ function structRef(node: Node, tok: Token): Node {
   return n;
 }
 
+/** Parses argument list and builds {@link NodeKind.Funcall}. */
 function funcall(ctx: { t: Token | null }, tok: Token, fn: Node): Node {
   addType(fn);
   let t = tok;
@@ -1522,6 +1596,7 @@ function funcall(ctx: { t: Token | null }, tok: Token, fn: Node): Node {
   return node;
 }
 
+/** Primary expressions: literals, identifiers, parens, compound literals via cast. */
 function primary(ctx: { t: Token | null }, tok: Token): Node {
   let t = tok;
   if (equal(t, "(") && isTypename(t.next)) {
@@ -1562,12 +1637,14 @@ function primary(ctx: { t: Token | null }, tok: Token): Node {
   errorTok(t, "expected an expression");
 }
 
+/** Parses an expression that must fold to an integer constant. */
 function constExpr(ctx: { t: Token | null }, tok: Token): bigint {
   const n = evalRval(expr(ctx, tok));
   ctx.t = ctx.t;
   return n;
 }
 
+/** Evaluates a constant AST subtree for array lengths and enum values. */
 function evalRval(node: Node): bigint {
   addType(node);
   switch (node.kind) {

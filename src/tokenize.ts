@@ -20,29 +20,38 @@ import { error, errorAt, errorTok, setCurrentFile } from "./diag.js";
 import { encodeUtf8CodePoint, isIdent1, isIdent2, nextCodePoint } from "./unicode.js";
 import { readFileSync } from "node:fs";
 
+/** Lexer: UTF-8 aware identifiers, preprocessor numbers, literals, and token utilities. */
+
 let currentFile: File;
 let atBol = true;
 let hasSpace = false;
 
 const inputFiles: File[] = [];
 
+/** All source {@link File} records registered by {@link tokenizeFile} this session. */
 export function getInputFiles(): File[] {
   return inputFiles;
 }
 
+/** Source slice for token `t` (same as `contents.slice(loc, loc+len)`). */
 function tokText(t: Token): string {
   return t.file.contents.slice(t.loc, t.loc + t.len);
 }
 
+/** True if `tok` spans exactly the punctuator or keyword text `op`. */
 export function equal(tok: Token, op: string): boolean {
   return tok.len === op.length && tok.file.contents.slice(tok.loc, tok.loc + tok.len) === op;
 }
 
+/** Consumes `op` or {@link errorTok}; returns the following token. */
 export function skip(tok: Token, op: string): Token {
   if (!equal(tok, op)) errorTok(tok, "expected '%s'", op);
   return tok.next!;
 }
 
+/**
+ * If `tok` matches `str`, advances `rest.current` and returns true; otherwise leaves `rest.current` at `tok`.
+ */
 export function consume(rest: { current: Token | null }, tok: Token, str: string): boolean {
   if (equal(tok, str)) {
     rest.current = tok.next;
@@ -100,10 +109,12 @@ const KW = new Set([
   "__attribute__",
 ]);
 
+/** True if `s` is a reserved word for this compiler's keyword set. */
 function isKeywordText(s: string): boolean {
   return KW.has(s);
 }
 
+/** Builds a token on `currentFile` at `[start, end)` with current BOL/space flags. */
 function newToken(kind: TokenKind, start: number, end: number): Token {
   const tok: Token = {
     kind,
@@ -126,10 +137,12 @@ function newToken(kind: TokenKind, start: number, end: number): Token {
   return tok;
 }
 
+/** True if `s` has prefix `q` at code unit index `i`. */
 function startswith(s: string, i: number, q: string): boolean {
   return s.slice(i, i + q.length) === q;
 }
 
+/** Byte length of a C11 identifier starting at `start`, or 0 if not an identifier. */
 function readIdentLen(s: string, start: number): number {
   const { cp, next } = nextCodePoint(s, start);
   if (!isIdent1(cp)) return 0;
@@ -141,6 +154,7 @@ function readIdentLen(s: string, start: number): number {
   }
 }
 
+/** Single hex digit to 0–15. */
 function fromHex(c: string): number {
   if (c >= "0" && c <= "9") return c.charCodeAt(0) - 48;
   if (c >= "a" && c <= "f") return c.charCodeAt(0) - 87;
@@ -173,6 +187,7 @@ const LONG_PUNCT = [
   "##",
 ];
 
+/** Longest punctuator match at `i` (multi-char operators first), else 0. */
 function readPunctLen(s: string, i: number): number {
   for (const kw of LONG_PUNCT) {
     if (startswith(s, i, kw)) return kw.length;
@@ -182,6 +197,7 @@ function readPunctLen(s: string, i: number): number {
   return 0;
 }
 
+/** Parses one char/escape after `\\` in a char or string literal; returns code point and index past it. */
 function readEscapedChar(s: string, i: number): { c: number; next: number } {
   const ch = s[i];
   if (ch >= "0" && ch <= "7") {
@@ -221,6 +237,7 @@ function readEscapedChar(s: string, i: number): { c: number; next: number } {
   }
 }
 
+/** Index of closing `"` for a string starting at `start` (after opening quote). */
 function stringLiteralEnd(s: string, start: number): number {
   let p = start;
   while (p < s.length && s[p] !== '"') {
@@ -231,6 +248,7 @@ function stringLiteralEnd(s: string, start: number): number {
   return p;
 }
 
+/** String literal token: UTF-8 payload in `str`, `ty` is `char[N]` including implicit NUL width. */
 function readStringLiteral(start: number, quote: number): Token {
   const end = stringLiteralEnd(currentFile.contents, quote + 1);
   const bytes: number[] = [];
@@ -254,6 +272,7 @@ function readStringLiteral(start: number, quote: number): Token {
   return tok;
 }
 
+/** Character constant token; value narrowed according to `ty` (e.g. `int` vs `unsigned`). */
 function readCharLiteral(start: number, quote: number, ty: Type): Token {
   let p = quote + 1;
   if (p >= currentFile.contents.length) errorAt(start, "unclosed char literal");
@@ -275,6 +294,7 @@ function readCharLiteral(start: number, quote: number, ty: Type): Token {
   return tok;
 }
 
+/** Parses integer literal text (decimal/hex/binary/octal) to bigint. */
 function parseIntBody(body: string, baseHint: number): bigint {
   const t = body.trim();
   if (t.length >= 2 && t.slice(0, 2).toLowerCase() === "0x") return BigInt(t);
@@ -284,6 +304,7 @@ function parseIntBody(body: string, baseHint: number): bigint {
   return BigInt(t);
 }
 
+/** If `tok` is an integer pp-number, rewrites it as {@link TokenKind.Num} with suffix-derived type; else false. */
 function convertPpInt(tok: Token): boolean {
   const full = tokText(tok);
   let l = false;
@@ -352,6 +373,7 @@ function convertPpInt(tok: Token): boolean {
   return true;
 }
 
+/** Converts a preprocessor number token to typed {@link TokenKind.Num} (integer or float). */
 function convertPpNumber(tok: Token): void {
   if (convertPpInt(tok)) return;
   const slice = tokText(tok);
@@ -369,6 +391,7 @@ function convertPpNumber(tok: Token): void {
   tok.ty = ty;
 }
 
+/** After preprocessing: classify id keywords and normalize all `PpNum` tokens. */
 export function convertPpTokens(tok: Token | null): void {
   for (let t = tok; t && t.kind !== TokenKind.Eof; t = t.next!) {
     const tx = tokText(t);
@@ -377,6 +400,7 @@ export function convertPpTokens(tok: Token | null): void {
   }
 }
 
+/** Fills `lineNo` on each token from newlines in `currentFile.contents`. */
 function addLineNumbers(head: Token | null): void {
   const input = currentFile.contents;
   let n = 1;
@@ -392,6 +416,10 @@ function addLineNumbers(head: Token | null): void {
   }
 }
 
+/**
+ * Lexes `file.contents` into a singly linked token list ending in {@link TokenKind.Eof}.
+ * Sets {@link setCurrentFile} for diagnostics.
+ */
 export function tokenize(file: File): Token {
   currentFile = file;
   setCurrentFile(file);
@@ -499,14 +527,17 @@ export function tokenize(file: File): Token {
   return head.next!;
 }
 
+/** Normalizes CRLF/CR to LF. */
 function canonicalizeNewline(p: string): string {
   return p.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+/** Removes backslash-newline splicing before lexing. */
 function removeBackslashNewline(p: string): string {
   return p.replace(/\\\n/g, "");
 }
 
+/** Expands `\\uXXXX` and `\\UXXXXXXXX` to UTF-16 code units in the source string. */
 function convertUniversalChars(p: string): string {
   let out = "";
   let i = 0;
@@ -526,6 +557,10 @@ function convertUniversalChars(p: string): string {
   return out;
 }
 
+/**
+ * Normalizes source text for lexing (newlines, splice, UCN) and ensures a trailing newline.
+ * @param fileNo Stable id for diagnostics and include ordering.
+ */
 export function newFile(name: string, fileNo: number, contents: string): File {
   let c = canonicalizeNewline(contents);
   c = removeBackslashNewline(c);
@@ -536,6 +571,10 @@ export function newFile(name: string, fileNo: number, contents: string): File {
 
 let fileCounter = 0;
 
+/**
+ * Reads `path` (or uses `contents`), registers the file, and returns the token stream head.
+ * @returns `null` on I/O failure instead of throwing.
+ */
 export function tokenizeFile(path: string, contents?: string): Token | null {
   try {
     const text = contents ?? readFileSync(path, "utf8");
@@ -549,6 +588,7 @@ export function tokenizeFile(path: string, contents?: string): Token | null {
   }
 }
 
+/** Concatenates two chains: last non-Eof of `tok1` points at `tok2`. */
 export function appendTokens(tok1: Token | null, tok2: Token | null): Token | null {
   if (!tok1 || tok1.kind === TokenKind.Eof) return tok2;
   let t = tok1;

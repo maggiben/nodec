@@ -22,6 +22,7 @@ export type HostHooks = {
   readLine?: () => string;
 };
 
+/** NUL-terminated UTF-8 string at `addr` in `mem` (empty on out-of-range). */
 function readCString(mem: Uint8Array, addr: bigint): string {
   let i = Number(addr);
   if (i < 0 || i >= mem.length) return "";
@@ -30,6 +31,7 @@ function readCString(mem: Uint8Array, addr: bigint): string {
   return new TextDecoder().decode(Uint8Array.from(bytes));
 }
 
+/** Rounds `n` up to a multiple of `a`. */
 function alignTo(n: number, a: number): number {
   return Math.floor((n + a - 1) / a) * a;
 }
@@ -37,11 +39,13 @@ function alignTo(n: number, a: number): number {
 /** Values passed to mini printf after the format pointer (ints as bigint, floats as number). */
 type PrintfArg = bigint | number;
 
+/** Coerces a printf/scanf numeric argument to `number`. */
 function argToNumber(a: PrintfArg | undefined): number {
   if (a === undefined) return 0;
   return typeof a === "bigint" ? Number(a) : a;
 }
 
+/** Interprets a printf `%s` argument as a pointer address. */
 function argToAddr(a: PrintfArg | undefined): bigint {
   if (a === undefined) return 0n;
   return typeof a === "bigint" ? a : BigInt(Math.trunc(a));
@@ -54,6 +58,7 @@ function formatPrintfFloat(a: PrintfArg | undefined): string {
   return n.toFixed(6);
 }
 
+/** Subset of `printf`: `%s` `%d` `%i` `%u` `%c` `%f` `%%` reading from linear `mem`. */
 function formatPrintf(mem: Uint8Array, fmtAddr: bigint, args: PrintfArg[]): string {
   const fmt = readCString(mem, fmtAddr);
   let ai = 0;
@@ -116,6 +121,11 @@ function scanfReadValues(mem: Uint8Array, hooks: HostHooks, fmtAddr: bigint): bi
   return values;
 }
 
+/**
+ * Built-in object passed as `__rt` into generated JS: loads/stores, libc stubs, printf/scanf, FILE*, heap.
+ * @param mem Shared linear memory image (mutated by generated code).
+ * @param heapBase First byte index allowed for bump `malloc` (see {@link layoutProgram}).
+ */
 export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: number) {
   let heapPtr = alignTo(heapBase, 16);
   /** Best-effort rand()/srand() state: mixes user seed into Math.random()-backed output. */
@@ -449,6 +459,9 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
   };
 }
 
+/**
+ * Clones `layout.memory`, evaluates the IIFE factory in a fresh VM context, and returns its exports (`fn_main`, …).
+ */
 export function runInVm(source: string, layout: Layout, hooks: HostHooks): Record<string, unknown> {
   const mem = Uint8Array.from(layout.memory);
   const __rt = createRuntime(mem, hooks, layout.heapBase);

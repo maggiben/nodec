@@ -15,6 +15,7 @@ export type IncludeContext = {
   includePaths: string[];
 };
 
+/** Deep-enough copy for macro expansion (detaches `next`, clones `str`). */
 function copyTok(tok: Token): Token {
   return {
     ...tok,
@@ -23,6 +24,7 @@ function copyTok(tok: Token): Token {
   };
 }
 
+/** Appends token chain `b` after a deep copy of `a` (excluding trailing Eof semantics). */
 function appendTok(a: Token | null, b: Token | null): Token | null {
   if (!a || a.kind === TokenKind.Eof) return b;
   const head = copyTok(a);
@@ -37,14 +39,17 @@ function appendTok(a: Token | null, b: Token | null): Token | null {
   return head;
 }
 
+/** Lexeme text of token `t`. */
 function tokStr(t: Token): string {
   return t.file.contents.slice(t.loc, t.loc + t.len);
 }
 
+/** True if `t` is `#` at beginning of a logical line (directive start). */
 function isHash(t: Token | null): boolean {
   return !!(t && t.atBol && equal(t, "#"));
 }
 
+/** Advances to the next line's first token (or Eof). */
 function skipLine(t: Token | null): Token | null {
   if (!t) return t;
   while (t && t.kind !== TokenKind.Eof && !t.atBol) t = t.next;
@@ -53,24 +58,29 @@ function skipLine(t: Token | null): Token | null {
 
 type MacroBody = { tokens: Token[]; params: string[] | null; variadic: boolean };
 
+/** Handles `#` directives, conditional inclusion, and object-like macro expansion. */
 export class Preprocessor {
   private macros = new Map<string, MacroBody>();
   private pragmaOnce = new Set<string>();
   private ctx: IncludeContext;
 
+  /** @param ctx Include search path list used by `#include`. */
   constructor(ctx: IncludeContext) {
     this.ctx = ctx;
     this.initPredefined();
   }
 
+  /** Defines compiler-identification macros. */
   private initPredefined(): void {
     this.macros.set("__nodec__", { tokens: [], params: null, variadic: false });
   }
 
+  /** Registers an object-like macro (tests / tooling); body tokens are expanded later. */
   define(name: string, body: Token[]): void {
     this.macros.set(name, { tokens: body, params: null, variadic: false });
   }
 
+  /** Removes a macro definition if present. */
   undef(name: string): void {
     this.macros.delete(name);
   }
@@ -97,10 +107,12 @@ export class Preprocessor {
     return null;
   }
 
+  /** Runs directive pass then macro expansion; returns a new token stream head. */
   process(head: Token | null): Token | null {
     return this.expand(this.directives(head));
   }
 
+  /** Strips/handlers for `#include`, `#define`, `#if`, etc.; emits non-directive tokens. */
   private directives(head: Token | null): Token | null {
     const outHead: Token = {
       kind: TokenKind.Eof,
@@ -300,6 +312,7 @@ export class Preprocessor {
     return outHead.next;
   }
 
+  /** Skips tokens until start of next line (after `#if` / `#elif` expression). */
   private skipIfExpr(start: Token | null): Token | null {
     let p = start;
     while (p && !p.atBol && p.kind !== TokenKind.Eof) p = p.next;
@@ -381,6 +394,7 @@ export class Preprocessor {
     return parseOr();
   }
 
+  /** Expands object-like macros on a linear token stream (hideset prevents infinite recursion). */
   private expand(head: Token | null): Token | null {
     const h: Token = {
       kind: TokenKind.Eof,
@@ -439,6 +453,7 @@ export class Preprocessor {
     return h.next;
   }
 
+  /** Expands a macro body token list while `hide` blocks re-expansion of active macro names. */
   private expandList(tokens: Token[], hide: Set<string>): Token | null {
     const h: Token = {
       kind: TokenKind.Eof,
@@ -486,6 +501,10 @@ export class Preprocessor {
   }
 }
 
+/**
+ * Full preprocessor pipeline: directives, includes, macros, then {@link convertPpTokens}.
+ * @param tok Token stream from {@link tokenize}.
+ */
 export function preprocess(tok: Token | null, ctx: IncludeContext): Token | null {
   const pp = new Preprocessor(ctx);
   const out = pp.process(tok);

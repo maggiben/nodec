@@ -1,5 +1,6 @@
 /** C11 identifier and display width helpers. */
 
+/** True if Unicode scalar value `c` lies in any closed pair `[range[i], range[i+1]]` until a `-1` sentinel. */
 function inRange(range: number[], c: number): boolean {
   for (let i = 0; i < range.length && range[i] !== -1; i += 2) {
     if (range[i] <= c && c <= range[i + 1]) return true;
@@ -133,10 +134,12 @@ const IDENT2_EXTRA: number[] = [
   -1,
 ];
 
+/** True if `c` may start a C11 identifier (ASCII letters, `$`, `_`, and Annex E ranges). */
 export function isIdent1(c: number): boolean {
   return inRange(IDENT1_RANGE, c);
 }
 
+/** True if `c` may continue an identifier (same as first char plus digits and combining marks). */
 export function isIdent2(c: number): boolean {
   return isIdent1(c) || inRange(IDENT2_EXTRA, c);
 }
@@ -149,6 +152,10 @@ export function nextCodePoint(s: string, i: number): { cp: number; next: number 
   return { cp: c, next };
 }
 
+/**
+ * Terminal column width from `lineStart` to `loc` in `contents` (ASCII=1, other BMP/supplementary=2).
+ * Used to align the `^` under diagnostics.
+ */
 export function displayWidth(contents: string, lineStart: number, loc: number): number {
   let w = 0;
   let i = lineStart;
@@ -161,6 +168,7 @@ export function displayWidth(contents: string, lineStart: number, loc: number): 
   return w;
 }
 
+/** UTF-8 byte sequence (1–4 bytes) for a single Unicode code point `c`. */
 export function encodeUtf8CodePoint(c: number): number[] {
   if (c <= 0x7f) return [c];
   if (c <= 0x7ff) return [0xc0 | (c >> 6), 0x80 | (c & 0x3f)];

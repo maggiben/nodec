@@ -16,6 +16,7 @@ import {
 } from "./ctypes.js";
 import { errorTok } from "./diag.js";
 
+/** True for bool/char/short/int/long/enum kinds. */
 export function isInteger(ty: Type): boolean {
   const k = ty.kind;
   return (
@@ -28,14 +29,17 @@ export function isInteger(ty: Type): boolean {
   );
 }
 
+/** True for float/double/long double. */
 export function isFlonum(ty: Type): boolean {
   return ty.kind === TypeKind.Float || ty.kind === TypeKind.Double || ty.kind === TypeKind.LDouble;
 }
 
+/** Integer or floating type. */
 export function isNumeric(ty: Type): boolean {
   return isInteger(ty) || isFlonum(ty);
 }
 
+/** C composite-type / assignment compatibility for the subsets this compiler models. */
 export function isCompatible(t1: Type, t2: Type): boolean {
   if (t1 === t2) return true;
   if (t1.origin) return isCompatible(t1.origin, t2);
@@ -73,6 +77,7 @@ export function isCompatible(t1: Type, t2: Type): boolean {
   }
 }
 
+/** Explicit cast node; ensures `expr` has inferred types first. */
 function newCast(expr: Node, ty: Type): Node {
   addType(expr);
   return {
@@ -114,6 +119,7 @@ function newCast(expr: Node, ty: Type): Node {
   };
 }
 
+/** Usual arithmetic conversions / common type for mixed operands (pointers, flonums, integers). */
 function getCommonType(ty1: Type, ty2: Type): Type {
   if (ty1.base) return pointerTo(ty1.base!);
   if (ty1.kind === TypeKind.Func) return pointerTo(ty1);
@@ -128,10 +134,15 @@ function getCommonType(ty1: Type, ty2: Type): Type {
   return a;
 }
 
+/** Common type of `lhs` and `rhs` after usual arithmetic conversions. */
 function usualArithConv(lhs: Node, rhs: Node): Type {
   return getCommonType(lhs.ty!, rhs.ty!);
 }
 
+/**
+ * Fills `node.ty` for expressions and statements (type checker / semantic pass).
+ * Idempotent when `node.ty` is already set.
+ */
 export function addType(node: Node | null): void {
   if (!node || node.ty) return;
   addType(node.lhs);
@@ -270,4 +281,5 @@ export function addType(node: Node | null): void {
   }
 }
 
+/** Re-exported for the parser to build explicit casts. */
 export { newCast };
