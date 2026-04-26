@@ -92,7 +92,7 @@ The `include/` directory provides minimal declarations. Implementations live in 
 | `fseek` / `ftell` / `fflush` | Stream position management with `SEEK_SET` / `SEEK_CUR` / `SEEK_END`; `fflush` validates stream handle. |
 | `malloc` | Bump pointer allocator; pointers are stable for the lifetime of one VM run. |
 | `free` | No-op (heap is not reused in-process). |
-| `srand` / `rand` | POSIX-style PRNG state (LCG-style). |
+| `srand` / `rand` | `Math.random()`-backed `rand()` with `srand()` seed mixing (best-effort parity with C API). |
 | `time` | Seconds since Unix epoch; optional pointer argument writes **unsigned 64-bit LE** to memory. |
 | `sleep` | Sleeps the given whole seconds via `Atomics.wait` (same thread as the VM). |
 

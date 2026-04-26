@@ -118,8 +118,9 @@ function scanfReadValues(mem: Uint8Array, hooks: HostHooks, fmtAddr: bigint): bi
 
 export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: number) {
   let heapPtr = alignTo(heapBase, 16);
-  /** POSIX-style PRNG state (glibc-style LCG). */
+  /** Best-effort rand()/srand() state: mixes user seed into Math.random()-backed output. */
   let randState = 1;
+  let randSalt = ((Date.now() >>> 0) ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
   /** One view for the whole linear memory; avoids per-load/store DataView allocation. */
   const dv = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
   const truthy = (v: unknown) => {
@@ -353,12 +354,24 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
   const srand = (seed: bigint) => {
     const s = Number(seed) >>> 0;
     randState = s === 0 ? 1 : s;
+    randSalt = (randSalt ^ randState ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
     return 0n;
   };
 
   const rand = () => {
-    randState = (randState * 1103515245 + 12345) & 0x7fffffff;
-    return BigInt(randState);
+    // Build a 53-bit random value from Math.random() (the maximum precision JS exposes),
+    // then fold it into a 31-bit C rand() result while mixing in srand()-driven state.
+    const hi = (Math.random() * 0x4000000) >>> 0; // 26 bits
+    const lo = (Math.random() * 0x8000000) >>> 0; // 27 bits
+    const raw53 = hi * 0x8000000 + lo;
+    const base31 = (raw53 % 0x80000000) >>> 0;
+
+    // Keep srand() meaningful by evolving local state and xoring it into output.
+    randState = (Math.imul(randState, 1664525) + 1013904223) >>> 0;
+    randSalt = (randSalt ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
+
+    const mixed = (base31 ^ randState ^ randSalt) & 0x7fffffff;
+    return BigInt(mixed);
   };
 
   /** Seconds since Unix epoch; if timer is non-null, writes the same value there (unsigned 64-bit LE). */
