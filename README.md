@@ -148,6 +148,7 @@ const { exitCode } = runCompiled("/path/to/app.c", {
 | `examples/file_io.c` | Host-backed file I/O: `fopen`, `fwrite`, `fread`, `fseek`, `ftell`, `fclose`. |
 | `examples/numbers.c` | `double` and `%f`. |
 | `examples/pointers_structs.c` | Pointers, structs, `->`, nested members, heap arrays; includes practical notes in comments. |
+| `examples/bench_sum.c` | Hot-path load/store loop; used by `npm run bench` (see below). |
 
 Run any of them with:
 
@@ -158,6 +159,18 @@ node dist/cli.js run examples/<name>.c
 Example output from `examples/mandelbrot.c`:
 
 ![Mandelbrot ASCII output](docs/mandelbrot-example.png)
+
+## Benchmark (`npm run bench`)
+
+From the repo root, `npm run bench` runs `tsc` and then `scripts/bench-vs-js.mjs`. That script compares three implementations of the same workload as [`examples/bench_sum.c`](examples/bench_sum.c): for `N = 1_000_000`, fill a buffer with `i % 256`, sum the bytes, and check the result against a known checksum (`sum % 251`). Each implementation is warmed up and validated before timing; the printed numbers are **median wall time per run** on your machine’s V8.
+
+| Line in the output | What it is |
+|----------------------|------------|
+| **nodec C** | Compiled C using **linear memory** and the emitted load/store loop. The harness compiles once and reuses a cached `vm.Script`, so the timed run is execution only—not compilation. |
+| **Plain JS** | Hand-written code using a **`Uint8Array`** and direct indexing—the same algorithm with idiomatic, monomorphic hot loops. This is roughly how fast “plain JavaScript” can be for the same pattern. |
+| **JS anti-pattern** | A **`new DataView(...)` on every store and every load**. That is intentionally wasteful; it mirrors naive host code. nodec’s runtime uses a **single cached `DataView`** for memory access instead. |
+
+**How to read it:** Plain JS will usually be **much faster** than nodec here: there are no `BigInt` pointer addresses and no `__rt.load` / `__rt.store` indirection in the hot path. nodec will usually be **much faster** than the per-access `DataView` variant. The takeaway is not “C on JS beats tuned JS,” but that **a tight linear-memory lowering plus a sane runtime** still beats JavaScript that repeats expensive host allocations on every memory access—and that comparing nodec to idiomatic TypedArray code is the fair upper bound for “same work in raw JS.”
 
 ## Practical limits (JavaScript backend)
 
