@@ -121,6 +121,18 @@ function scanfReadValues(mem: Uint8Array, hooks: HostHooks, fmtAddr: bigint): bi
   return values;
 }
 
+function writeCString(mem: Uint8Array, dstAddr: bigint, maxBytes: number, text: string): number {
+  const p = Number(dstAddr);
+  if (!Number.isFinite(p) || p < 0 || p >= mem.length || maxBytes <= 0) return 0;
+  const enc = new TextEncoder();
+  const bytes = enc.encode(text);
+  const cap = Math.max(0, Math.min(maxBytes - 1, mem.length - p - 1));
+  let w = 0;
+  for (; w < bytes.length && w < cap; w++) mem[p + w] = bytes[w]!;
+  mem[p + w] = 0;
+  return w;
+}
+
 /**
  * Built-in object passed as `__rt` into generated JS: loads/stores, libc stubs, printf/scanf, FILE*, heap.
  * @param mem Shared linear memory image (mutated by generated code).
@@ -128,6 +140,7 @@ function scanfReadValues(mem: Uint8Array, hooks: HostHooks, fmtAddr: bigint): bi
  */
 export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: number) {
   let heapPtr = alignTo(heapBase, 16);
+  const recentCalls: string[] = [];
   /** Best-effort rand()/srand() state: mixes user seed into Math.random()-backed output. */
   let randState = 1;
   let randSalt = ((Date.now() >>> 0) ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
@@ -139,6 +152,19 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     return !!v;
   };
 
+  const castFloat = (v: unknown): number => {
+    if (typeof v === "number") return v;
+    if (typeof v === "bigint") return Number(v);
+    return Number(v as number) || 0;
+  };
+
+  const castInt = (v: unknown): bigint => {
+    if (typeof v === "bigint") return v;
+    if (typeof v === "number") return BigInt(Math.trunc(v));
+    const n = Number(v as number);
+    return BigInt(Number.isFinite(n) ? Math.trunc(n) : 0);
+  };
+
   const eq = (a: unknown, b: unknown) => {
     if (typeof a === "bigint" && typeof b === "bigint") return a === b;
     return BigInt(Number(a as bigint)) === BigInt(Number(b as bigint));
@@ -146,19 +172,39 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
 
   const load = (addr: bigint, size: number): bigint => {
     const i = Number(addr);
+    if (!Number.isFinite(i) || i < 0 || i + size > mem.length) return 0n;
     if (size === 1) return BigInt(mem[i]!);
     if (size === 2) return BigInt(dv.getInt16(i, true));
     if (size === 4) return BigInt(dv.getInt32(i, true));
     return dv.getBigUint64(i, true);
   };
 
+  const loadf = (addr: bigint, size: number): number => {
+    const i = Number(addr);
+    if (!Number.isFinite(i) || i < 0 || i + size > mem.length) return 0;
+    if (size === 4) return dv.getFloat32(i, true);
+    if (size === 8) return dv.getFloat64(i, true);
+    return Number(load(addr, size));
+  };
+
   const store = (addr: bigint, val: bigint, size: number): bigint => {
     const i = Number(addr);
+    if (!Number.isFinite(i) || i < 0 || i + size > mem.length) return 0n;
     if (size === 1) mem[i] = Number(val) & 0xff;
     else if (size === 2) dv.setInt16(i, Number(val), true);
     else if (size === 4) dv.setInt32(i, Number(val), true);
     else dv.setBigUint64(i, val, true);
     return val;
+  };
+
+  const storef = (addr: bigint, val: unknown, size: number): number => {
+    const i = Number(addr);
+    if (!Number.isFinite(i) || i < 0 || i + size > mem.length) return 0;
+    const num = typeof val === "number" ? val : typeof val === "bigint" ? Number(val) : Number(val);
+    if (size === 4) dv.setFloat32(i, num, true);
+    else if (size === 8) dv.setFloat64(i, num, true);
+    else store(addr, BigInt(Math.trunc(Number.isFinite(num) ? num : 0)), size);
+    return num;
   };
 
   const storeGlobal = (off: number, val: bigint, size: number) => store(BigInt(off), val, size);
@@ -182,6 +228,18 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     const start = heapPtr;
     heapPtr = alignTo(heapPtr + n, 16);
     if (heapPtr > mem.length) return 0n;
+    return BigInt(start);
+  };
+
+  const stackAlloc = (size: bigint, align: number) => {
+    const n = Number(size);
+    if (!Number.isFinite(n) || n <= 0) return 0n;
+    const a = Number.isFinite(align) && align > 0 ? Math.trunc(align) : 8;
+    heapPtr = alignTo(heapPtr, Math.min(Math.max(a, 1), 64));
+    const start = heapPtr;
+    heapPtr = heapPtr + Math.trunc(n);
+    if (heapPtr > mem.length) return 0n;
+    mem.fill(0, start, Math.min(mem.length, heapPtr));
     return BigInt(start);
   };
 
@@ -411,6 +469,16 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     return BigInt(w);
   };
 
+  const snprintf = (...xs: PrintfArg[]) => {
+    if (xs.length < 3) return 0n;
+    const dst = argToAddr(xs[0]);
+    const size = Math.max(0, Math.trunc(argToNumber(xs[1])));
+    const fmt = argToAddr(xs[2]);
+    const out = formatPrintf(mem, fmt, xs.slice(3));
+    writeCString(mem, dst, size, out);
+    return BigInt(out.length);
+  };
+
   /** POSIX-style sleep(seconds); blocks the VM thread (Atomics.wait). */
   const sleep = (seconds: bigint) => {
     const s = Number(seconds);
@@ -421,8 +489,210 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     return 0n;
   };
 
-  const call = (_name: string, _args: bigint[]) => {
-    hooks.log(`[nodec] unimplemented host call: ${_name}`);
+  const call = (name: string, args: bigint[]) => {
+    recentCalls.push(name);
+    if (recentCalls.length > 16) recentCalls.shift();
+    if (name === "calloc") {
+      if (args.length < 2) return 0n;
+      const nmemb = Number(args[0]);
+      const size = Number(args[1]);
+      if (!Number.isFinite(nmemb) || !Number.isFinite(size) || nmemb < 0 || size < 0) {
+        hooks.log(`[nodec] calloc invalid args: nmemb=${nmemb} size=${size}`);
+        return 0n;
+      }
+      let total = Math.max(0, Math.trunc(nmemb * size));
+      // libc may return either NULL or a unique pointer for calloc(0,0). We choose
+      // a stable non-NULL 1-byte allocation to keep embedded runtimes progressing.
+      if (total === 0) total = 1;
+      const ptr = malloc(BigInt(total));
+      if (ptr === 0n) {
+        hooks.log(`[nodec] calloc failed: nmemb=${nmemb} size=${size} total=${total}`);
+        return 0n;
+      }
+      const p = Number(ptr);
+      mem.fill(0, p, Math.min(mem.length, p + total));
+      return ptr;
+    }
+    if (name === "memset") {
+      if (args.length < 3) return 0n;
+      const dst = Number(args[0]);
+      const val = Number(args[1]) & 0xff;
+      const n = Math.max(0, Math.trunc(Number(args[2])));
+      if (!Number.isFinite(dst) || dst < 0 || dst >= mem.length || n <= 0) return args[0] ?? 0n;
+      mem.fill(val, dst, Math.min(mem.length, dst + n));
+      return args[0] ?? 0n;
+    }
+    if (name === "memcpy" || name === "memmove") {
+      if (args.length < 3) return 0n;
+      const dst = Number(args[0]);
+      const src = Number(args[1]);
+      const n = Math.max(0, Math.trunc(Number(args[2])));
+      if (!Number.isFinite(dst) || !Number.isFinite(src) || n <= 0) return args[0] ?? 0n;
+      if (dst < 0 || src < 0 || dst >= mem.length || src >= mem.length) return args[0] ?? 0n;
+      const span = Math.min(n, mem.length - src, mem.length - dst);
+      if (span > 0) mem.copyWithin(dst, src, src + span);
+      return args[0] ?? 0n;
+    }
+    if (name === "memcmp") {
+      if (args.length < 3) return 0n;
+      const a = Number(args[0]);
+      const b = Number(args[1]);
+      const n = Math.max(0, Math.trunc(Number(args[2])));
+      if (!Number.isFinite(a) || !Number.isFinite(b) || n <= 0) return 0n;
+      const span = Math.min(n, mem.length - Math.max(0, a), mem.length - Math.max(0, b));
+      for (let i = 0; i < span; i++) {
+        const av = mem[a + i]!;
+        const bv = mem[b + i]!;
+        if (av !== bv) return BigInt(av - bv);
+      }
+      return 0n;
+    }
+    if (name === "strlen") {
+      if (args.length < 1) return 0n;
+      const s = readCString(mem, args[0]!);
+      return BigInt(s.length);
+    }
+    if (name === "strcmp" || name === "strncmp") {
+      if (args.length < 2) return 0n;
+      const a = readCString(mem, args[0]!);
+      const b = readCString(mem, args[1]!);
+      const n = name === "strncmp" ? Math.max(0, Math.trunc(Number(args[2] ?? 0n))) : Math.max(a.length, b.length);
+      const aa = a.slice(0, n);
+      const bb = b.slice(0, n);
+      if (aa === bb) return 0n;
+      return BigInt(aa < bb ? -1 : 1);
+    }
+    if (name === "strcpy" || name === "strncpy") {
+      if (args.length < 2) return 0n;
+      const dst = Number(args[0]);
+      const src = readCString(mem, args[1]!);
+      if (!Number.isFinite(dst) || dst < 0 || dst >= mem.length) return args[0] ?? 0n;
+      const max = name === "strncpy" ? Math.max(0, Math.trunc(Number(args[2] ?? 0n))) : src.length + 1;
+      const enc = new TextEncoder();
+      const bytes = enc.encode(src);
+      const n = Math.min(max, mem.length - dst);
+      let i = 0;
+      for (; i < n && i < bytes.length; i++) mem[dst + i] = bytes[i]!;
+      for (; i < n; i++) mem[dst + i] = 0;
+      return args[0] ?? 0n;
+    }
+    if (name === "strchr" || name === "strrchr" || name === "memchr") {
+      if (args.length < 2) return 0n;
+      const start = Number(args[0]);
+      const ch = Number(args[1]) & 0xff;
+      if (!Number.isFinite(start) || start < 0 || start >= mem.length) return 0n;
+      const max =
+        name === "memchr"
+          ? Math.max(0, Math.trunc(Number(args[2] ?? 0n)))
+          : mem.length - start;
+      let found = -1;
+      for (let i = 0; i < max && start + i < mem.length; i++) {
+        if (mem[start + i] === ch) {
+          found = start + i;
+          if (name !== "strrchr") break;
+        }
+        if (name !== "memchr" && mem[start + i] === 0) break;
+      }
+      return found >= 0 ? BigInt(found) : 0n;
+    }
+    if (name === "strspn" || name === "strcspn") {
+      if (args.length < 2) return 0n;
+      const s = readCString(mem, args[0]!);
+      const accept = readCString(mem, args[1]!);
+      const set = new Set(Array.from(accept));
+      let i = 0;
+      for (; i < s.length; i++) {
+        const has = set.has(s[i]!);
+        if ((name === "strspn" && !has) || (name === "strcspn" && has)) break;
+      }
+      return BigInt(i);
+    }
+    if (name === "strpbrk") {
+      if (args.length < 2) return 0n;
+      const base = Number(args[0]);
+      const s = readCString(mem, args[0]!);
+      const accept = new Set(Array.from(readCString(mem, args[1]!)));
+      for (let i = 0; i < s.length; i++) {
+        if (accept.has(s[i]!)) return BigInt(base + i);
+      }
+      return 0n;
+    }
+    if (name === "atoi") {
+      if (args.length < 1) return 0n;
+      const s = readCString(mem, args[0]!);
+      return BigInt(Number.parseInt(s, 10) || 0);
+    }
+    if (name === "atol") {
+      if (args.length < 1) return 0n;
+      const s = readCString(mem, args[0]!);
+      return BigInt(Number.parseInt(s, 10) || 0);
+    }
+    if (name === "atof") {
+      if (args.length < 1) return 0n;
+      const s = readCString(mem, args[0]!);
+      const n = Number.parseFloat(s);
+      return BigInt(Math.trunc(Number.isFinite(n) ? n : 0));
+    }
+    if (name === "realloc") {
+      if (args.length < 2) return 0n;
+      const oldPtr = args[0] ?? 0n;
+      const size = Math.max(0, Math.trunc(Number(args[1] ?? 0n)));
+      if (oldPtr === 0n) return malloc(BigInt(size));
+      if (size === 0) return 0n;
+      const newPtr = malloc(BigInt(size));
+      if (newPtr === 0n) return 0n;
+      const src = Number(oldPtr);
+      const dst = Number(newPtr);
+      if (src >= 0 && src < mem.length && dst >= 0 && dst < mem.length) {
+        const span = Math.min(size, mem.length - src, mem.length - dst);
+        if (span > 0) mem.copyWithin(dst, src, src + span);
+      }
+      return newPtr;
+    }
+    if (name === "isnan") {
+      const v = Number(args[0] ?? 0n);
+      return Number.isNaN(v) ? 1n : 0n;
+    }
+    if (name === "isinf") {
+      const v = Number(args[0] ?? 0n);
+      return Number.isFinite(v) ? 0n : 1n;
+    }
+    if (name === "abort") {
+      hooks.log(`[nodec] abort() called; recent host calls: ${recentCalls.join(", ")}`);
+      throw new Error("abort() called");
+    }
+    if (name === "snprintf") {
+      return snprintf(...args);
+    }
+    if (name === "vsnprintf") {
+      if (args.length < 3) return 0n;
+      const dst = args[0] ?? 0n;
+      const size = args[1] ?? 0n;
+      const fmt = args[2] ?? 0n;
+      const out = formatPrintf(mem, fmt, []);
+      writeCString(mem, dst, Math.max(0, Math.trunc(Number(size))), out);
+      return BigInt(out.length);
+    }
+    if (name === "fprintf") {
+      if (args.length < 2) return 0n;
+      const stream = args[0] ?? 0n;
+      const fmt = args[1] ?? 0n;
+      const line = formatPrintf(mem, fmt, args.slice(2));
+      const id = readFileSlotId(stream);
+      if (id === null) hooks.log(line);
+      else {
+        const slot = fileSlots.get(id)!;
+        const buf = Buffer.from(new TextEncoder().encode(line));
+        try {
+          writeSync(slot.fd, buf, 0, buf.length, slot.pos);
+          slot.pos += buf.length;
+        } catch {
+          hooks.log(line);
+        }
+      }
+      return BigInt(line.length);
+    }
+    hooks.log(`[nodec] unimplemented host call: ${name}`);
     return 0n;
   };
 
@@ -431,16 +701,22 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
   return {
     memory: mem,
     truthy,
+    castFloat,
+    castInt,
     eq,
     load,
+    loadf,
     store,
+    storef,
     storeGlobal,
     ptrAdd,
     ptrSub,
     printf,
     sprintf,
+    snprintf,
     scanfParsed,
     malloc,
+    stackAlloc,
     free,
     srand,
     rand,
