@@ -237,7 +237,19 @@ export function addType(node: Node | null): void {
       return;
     }
     case NodeKind.Deref:
-      if (!node.lhs!.ty!.base) errorTok(node.tok!, "invalid pointer dereference");
+      if (!node.lhs!.ty!.base) {
+        const lhsKind = node.lhs?.kind ?? "<null>";
+        const lhsTyKind = node.lhs?.ty?.kind ?? "<null>";
+        const tok = node.tok!;
+        const snippet = tok.file.contents.slice(Math.max(0, tok.loc - 20), Math.min(tok.file.contents.length, tok.loc + 40));
+        errorTok(
+          node.tok!,
+          "invalid pointer dereference (lhs kind=%s ty=%s near=%s)",
+          String(lhsKind),
+          String(lhsTyKind),
+          snippet.replace(/\n/g, " ")
+        );
+      }
       if (node.lhs!.ty!.base!.kind === TypeKind.Void)
         errorTok(node.tok!, "dereferencing a void pointer");
       node.ty = node.lhs!.ty!.base!;

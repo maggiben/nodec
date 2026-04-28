@@ -70,6 +70,10 @@ function isIntegerTy(ty: Type): boolean {
   );
 }
 
+function isFlonumTy(ty: Type): boolean {
+  return ty.kind === TypeKind.Float || ty.kind === TypeKind.Double || ty.kind === TypeKind.LDouble;
+}
+
 /** True if this expression was integer-like before Ptr casts from ptr+int typing. */
 function effectiveIntegerExpr(n: Node | null): boolean {
   if (!n?.ty) return false;
@@ -98,6 +102,20 @@ type ScanfTarget =
   | { k: "local"; js: string }
   | { k: "mem"; ptr: string; size: number };
 
+function collectAddressTakenLocals(node: Node | null, out: Set<Obj>): void {
+  if (!node) return;
+  if (node.kind === NodeKind.Addr && node.lhs?.kind === NodeKind.Var && node.lhs.var?.isLocal) out.add(node.lhs.var);
+  collectAddressTakenLocals(node.lhs, out);
+  collectAddressTakenLocals(node.rhs, out);
+  collectAddressTakenLocals(node.cond, out);
+  collectAddressTakenLocals(node.then, out);
+  collectAddressTakenLocals(node.els, out);
+  collectAddressTakenLocals(node.init, out);
+  collectAddressTakenLocals(node.inc, out);
+  for (let n = node.body; n; n = n.next) collectAddressTakenLocals(n, out);
+  for (let n = node.args; n; n = n.next) collectAddressTakenLocals(n, out);
+}
+
 /** Size in bytes of the type `ptrNode` points to (default 4 if unknown). */
 function pointeeSize(ptrNode: Node): number {
   const t = ptrNode.ty;
@@ -112,6 +130,7 @@ function classifyScanfPtr(
   ptrArg: Node,
   fn: Obj,
   localJs: Map<Obj, string>,
+  localAddr: Map<Obj, string>,
   layout: Layout,
   globalOffConst: Map<string, string>,
   definedFns: Set<string>
@@ -119,13 +138,15 @@ function classifyScanfPtr(
   if (ptrArg.kind === NodeKind.Addr && ptrArg.lhs?.kind === NodeKind.Var) {
     const v = ptrArg.lhs.var!;
     if (v.isLocal) {
+      const addr = localAddr.get(v);
+      if (addr) return { k: "mem", ptr: addr, size: pointeeSize(ptrArg) };
       const js = localJs.get(v);
       if (js) return { k: "local", js };
     }
   }
   return {
     k: "mem",
-    ptr: emitExpr(ptrArg, fn, localJs, layout, globalOffConst, definedFns),
+    ptr: emitExpr(ptrArg, fn, localJs, localAddr, layout, globalOffConst, definedFns),
     size: pointeeSize(ptrArg),
   };
 }
@@ -135,16 +156,17 @@ function emitScanfCall(
   n: Node,
   fn: Obj,
   localJs: Map<Obj, string>,
+  localAddr: Map<Obj, string>,
   layout: Layout,
   globalOffConst: Map<string, string>,
   definedFns: Set<string>
 ): string {
   const fmtNode = n.args;
   if (!fmtNode) return "0n";
-  const fmtJs = emitExpr(fmtNode, fn, localJs, layout, globalOffConst, definedFns);
+  const fmtJs = emitExpr(fmtNode, fn, localJs, localAddr, layout, globalOffConst, definedFns);
   const targets: ScanfTarget[] = [];
   for (let a = fmtNode.next; a; a = a.next)
-    targets.push(classifyScanfPtr(a, fn, localJs, layout, globalOffConst, definedFns));
+    targets.push(classifyScanfPtr(a, fn, localJs, localAddr, layout, globalOffConst, definedFns));
   const assigns = targets
     .map((t, i) => {
       if (t.k === "local") return `${t.js} = _s[${i}] ?? 0n;`;
@@ -158,8 +180,11 @@ function emitScanfCall(
  * Lays out globals and string literals in a 1 MiB linear `memory` image; returns `heapBase` for malloc.
  */
 export function layoutProgram(prog: Obj | null): Layout {
-  const memory = new Uint8Array(1024 * 1024);
-  let off = 0;
+  // Keep a larger linear memory to accommodate bigger single-TU programs
+  // such as embedded runtimes (e.g. mjs).
+  const memory = new Uint8Array(16 * 1024 * 1024);
+  // Reserve low memory so NULL/near-NULL pointer bugs don't alias globals.
+  let off = 4096;
   const globalOff = new Map<string, number>();
   const stringOff = new Map<Obj, number>();
 
@@ -193,6 +218,7 @@ function emitExpr(
   n: Node | null,
   fn: Obj,
   localJs: Map<Obj, string>,
+  localAddr: Map<Obj, string>,
   layout: Layout,
   globalOffConst: Map<string, string>,
   definedFns: Set<string>
@@ -206,7 +232,15 @@ function emitExpr(
       return `${n.val}n`;
     case NodeKind.Var: {
       const v = n.var!;
-      if (v.isLocal) return localJs.get(v) ?? "0n";
+      if (v.isLocal) {
+        const addr = localAddr.get(v);
+        if (addr) {
+          if (v.ty.kind === TypeKind.Array || v.ty.kind === TypeKind.Struct || v.ty.kind === TypeKind.Union) return addr;
+          if (isFlonumTy(v.ty)) return `__rt.loadf(${addr}, ${v.ty.size})`;
+          return `__rt.load(${addr}, ${v.ty.size})`;
+        }
+        return localJs.get(v) ?? "0n";
+      }
       const go = globalOffConst.get(v.name);
       if (go) return `${go}`;
       const so = layout.stringOff.get(v);
@@ -214,23 +248,33 @@ function emitExpr(
       return "0n";
     }
     case NodeKind.Cast:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      if (n.ty && isFlonumTy(n.ty))
+        return `__rt.castFloat(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+      if (n.ty && isIntegerTy(n.ty))
+        return `__rt.castInt(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Addr: {
       const inner = n.lhs;
       if (inner?.kind === NodeKind.Var) {
         const v = inner.var!;
+        if (v.isLocal) {
+          const la = localAddr.get(v);
+          if (la) return `${la}`;
+        }
         const go = globalOffConst.get(v.name);
         if (go) return `${go}n`;
         const so = layout.stringOff.get(v);
         if (so !== undefined) return `${so}n`;
       }
-      return `BigInt(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `BigInt(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     }
     case NodeKind.Deref:
-      return `__rt.load(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}, ${n.ty!.size})`;
+      if (n.ty && isFlonumTy(n.ty))
+        return `__rt.loadf(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${n.ty.size})`;
+      return `__rt.load(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${n.ty!.size})`;
     case NodeKind.Add: {
-      const L = emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns);
-      const R = emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns);
+      const L = emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns);
+      const R = emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns);
       const lp = peelPtrExpr(n.lhs);
       const rp = peelPtrExpr(n.rhs);
       if (lp && effectiveIntegerExpr(n.rhs) && !rp) {
@@ -248,8 +292,8 @@ function emitExpr(
       return `(${L} + ${R})`;
     }
     case NodeKind.Sub: {
-      const L = emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns);
-      const R = emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns);
+      const L = emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns);
+      const R = emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns);
       const lp = peelPtrExpr(n.lhs);
       const rp = peelPtrExpr(n.rhs);
       if (lp && effectiveIntegerExpr(n.rhs) && !rp) {
@@ -261,51 +305,93 @@ function emitExpr(
       return `(${L} - ${R})`;
     }
     case NodeKind.Mul:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)} * ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} * ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Div:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)} / ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} / ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Mod:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)} % ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} % ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.BitAnd:
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} & ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.BitOr:
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} | ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.BitXor:
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} ^ ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.Shl:
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} << ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.Shr:
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} >> ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Eq:
-      return `__rt.eq(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}, ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `__rt.eq(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Ne:
-      return `!__rt.eq(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}, ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `!__rt.eq(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Lt:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)} < ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} < ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Le:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)} <= ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)} <= ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Assign: {
       const lhs = n.lhs!;
       if (lhs.kind === NodeKind.Var && lhs.var!.isLocal) {
+        const la = localAddr.get(lhs.var!);
+        if (la) {
+          if (lhs.ty && isFlonumTy(lhs.ty))
+            return `__rt.storef(${la}, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${lhs.ty.size})`;
+          return `__rt.store(${la}, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${lhs.ty!.size})`;
+        }
         const nm = localJs.get(lhs.var!)!;
-        return `(${nm} = ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+        return `(${nm} = ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
       }
       if (lhs.kind === NodeKind.Deref) {
-        return `__rt.store(${emitExpr(lhs.lhs, fn, localJs, layout, globalOffConst, definedFns)}, ${emitExpr(
+        if (lhs.ty && isFlonumTy(lhs.ty))
+          return `__rt.storef(${emitExpr(lhs.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${emitExpr(
+            n.rhs,
+            fn,
+            localJs,
+            localAddr,
+            layout,
+            globalOffConst,
+            definedFns
+          )}, ${lhs.ty.size})`;
+        return `__rt.store(${emitExpr(lhs.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${emitExpr(
           n.rhs,
           fn,
           localJs,
+          localAddr,
           layout,
           globalOffConst,
           definedFns
         )}, ${lhs.ty!.size})`;
       }
       if (lhs.kind === NodeKind.Member) {
-        const md = memberDerefBase(lhs, (x) => emitExpr(x, fn, localJs, layout, globalOffConst, definedFns));
-        if (md)
+        const md = memberDerefBase(lhs, (x) => emitExpr(x, fn, localJs, localAddr, layout, globalOffConst, definedFns));
+        if (md) {
+          if (lhs.member?.ty && isFlonumTy(lhs.member.ty))
+            return `__rt.storef(__rt.ptrAdd(${md.ptr}, ${md.offset}n), ${emitExpr(
+              n.rhs,
+              fn,
+              localJs,
+              localAddr,
+              layout,
+              globalOffConst,
+              definedFns
+            )}, ${lhs.member.ty.size})`;
           return `__rt.store(__rt.ptrAdd(${md.ptr}, ${md.offset}n), ${emitExpr(
             n.rhs,
             fn,
             localJs,
+            localAddr,
             layout,
             globalOffConst,
             definedFns
           )}, ${lhs.member!.ty.size})`;
+        }
       }
       if (lhs.kind === NodeKind.Var) {
         const g = globalOffConst.get(lhs.var!.name);
-        if (g)
-          return `__rt.storeGlobal(${g}, ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)}, ${lhs.ty!.size})`;
+        if (g) {
+          if (lhs.ty && isFlonumTy(lhs.ty))
+            return `__rt.storef(${g}n, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${lhs.ty.size})`;
+          return `__rt.storeGlobal(${g}, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${lhs.ty!.size})`;
+        }
       }
       return `0n`;
     }
@@ -314,10 +400,10 @@ function emitExpr(
       let name = "";
       if (callee.kind === NodeKind.Var) name = callee.var!.name;
       const args: string[] = [];
-      for (let a = n.args; a; a = a.next) args.push(emitExpr(a, fn, localJs, layout, globalOffConst, definedFns));
+      for (let a = n.args; a; a = a.next) args.push(emitExpr(a, fn, localJs, localAddr, layout, globalOffConst, definedFns));
       if (name === "printf") return `__rt.printf(${args.join(", ")})`;
       if (name === "sprintf") return `__rt.sprintf(${args.join(", ")})`;
-      if (name === "scanf") return emitScanfCall(n, fn, localJs, layout, globalOffConst, definedFns);
+      if (name === "scanf") return emitScanfCall(n, fn, localJs, localAddr, layout, globalOffConst, definedFns);
       if (name === "malloc") return `__rt.malloc(${args.join(", ")})`;
       if (name === "free") return `__rt.free(${args.join(", ")})`;
       if (name === "srand") return `__rt.srand(${args.join(", ")})`;
@@ -335,34 +421,47 @@ function emitExpr(
       return `__rt.call(${JSON.stringify(name)}, [${args.join(", ")}])`;
     }
     case NodeKind.Member: {
-      const md = memberDerefBase(n, (x) => emitExpr(x, fn, localJs, layout, globalOffConst, definedFns));
-      if (md) return `__rt.member(${md.ptr}, ${md.offset}, ${n.member!.ty.size})`;
-      return `__rt.member(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}, ${n.member!.offset}, ${n.member!.ty.size})`;
+      const md = memberDerefBase(n, (x) => emitExpr(x, fn, localJs, localAddr, layout, globalOffConst, definedFns));
+      if (md) {
+        if (n.member?.ty && isFlonumTy(n.member.ty))
+          return `__rt.loadf(__rt.ptrAdd(${md.ptr}, ${md.offset}n), ${n.member.ty.size})`;
+        return `__rt.member(${md.ptr}, ${md.offset}, ${n.member!.ty.size})`;
+      }
+      const bp = emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns);
+      if (n.member?.ty && isFlonumTy(n.member.ty))
+        return `__rt.loadf(__rt.ptrAdd(${bp}, ${n.member.offset}n), ${n.member.ty.size})`;
+      return `__rt.member(${bp}, ${n.member!.offset}, ${n.member!.ty.size})`;
     }
     case NodeKind.Not:
-      return `!__rt.truthy(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `!__rt.truthy(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.LogAnd:
-      return `(__rt.truthy(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}) && __rt.truthy(${emitExpr(
+      return `(__rt.truthy(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}) && __rt.truthy(${emitExpr(
         n.rhs,
         fn,
         localJs,
+        localAddr,
         layout,
         globalOffConst,
         definedFns
       )}))`;
     case NodeKind.LogOr:
-      return `(__rt.truthy(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}) || __rt.truthy(${emitExpr(
+      return `(__rt.truthy(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}) || __rt.truthy(${emitExpr(
         n.rhs,
         fn,
         localJs,
+        localAddr,
         layout,
         globalOffConst,
         definedFns
       )}))`;
     case NodeKind.Comma:
-      return `(${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)}, ${emitExpr(n.rhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)}, ${emitExpr(n.rhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.Cond:
+      return `(__rt.truthy(${emitExpr(n.cond, fn, localJs, localAddr, layout, globalOffConst, definedFns)}) ? ${emitExpr(n.then, fn, localJs, localAddr, layout, globalOffConst, definedFns)} : ${emitExpr(n.els, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     case NodeKind.Neg:
-      return `(-${emitExpr(n.lhs, fn, localJs, layout, globalOffConst, definedFns)})`;
+      return `(-${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
+    case NodeKind.BitNot:
+      return `(~${emitExpr(n.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)})`;
     default:
       return "0n";
   }
@@ -392,12 +491,13 @@ function emitLoopCond(
   n: Node | null,
   fn: Obj,
   localJs: Map<Obj, string>,
+  localAddr: Map<Obj, string>,
   layout: Layout,
   globalOffConst: Map<string, string>,
   definedFns: Set<string>
 ): string {
   if (!n) return "true";
-  const ex = emitExpr(n, fn, localJs, layout, globalOffConst, definedFns);
+  const ex = emitExpr(n, fn, localJs, localAddr, layout, globalOffConst, definedFns);
   if (loopCondSkipsTruthy(n)) return ex;
   return `__rt.truthy(${ex})`;
 }
@@ -413,6 +513,7 @@ function emitStmt(
   cur: Node | null,
   fn: Obj,
   localJs: Map<Obj, string>,
+  localAddr: Map<Obj, string>,
   layout: Layout,
   globalOffConst: Map<string, string>,
   definedFns: Set<string>,
@@ -424,22 +525,22 @@ function emitStmt(
   switch (cur.kind) {
     case NodeKind.Block: {
       for (let b = cur.body; b; b = b.next)
-        s += emitStmt(b, fn, localJs, layout, globalOffConst, definedFns, indent, false);
+        s += emitStmt(b, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent, false);
       break;
     }
     case NodeKind.Return:
-      s += `${indent}return ${cur.lhs ? emitExpr(cur.lhs, fn, localJs, layout, globalOffConst, definedFns) : "0n"};\n`;
+      s += `${indent}return ${cur.lhs ? emitExpr(cur.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns) : "0n"};\n`;
       break;
     case NodeKind.ExprStmt:
-      s += `${indent}${emitExpr(cur.lhs, fn, localJs, layout, globalOffConst, definedFns)};\n`;
+      s += `${indent}${emitExpr(cur.lhs, fn, localJs, localAddr, layout, globalOffConst, definedFns)};\n`;
       break;
     case NodeKind.If: {
-      s += `${indent}if (__rt.truthy(${emitExpr(cur.cond, fn, localJs, layout, globalOffConst, definedFns)})) {\n`;
-      s += emitStmt(cur.then, fn, localJs, layout, globalOffConst, definedFns, indent + "  ", false);
+      s += `${indent}if (__rt.truthy(${emitExpr(cur.cond, fn, localJs, localAddr, layout, globalOffConst, definedFns)})) {\n`;
+      s += emitStmt(cur.then, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent + "  ", false);
       s += `${indent}}`;
       if (cur.els) {
         s += ` else {\n`;
-        s += emitStmt(cur.els, fn, localJs, layout, globalOffConst, definedFns, indent + "  ", false);
+        s += emitStmt(cur.els, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent + "  ", false);
         s += `${indent}}\n`;
       } else s += "\n";
       break;
@@ -447,23 +548,30 @@ function emitStmt(
     case NodeKind.For: {
       const isWhile = !cur.init && !cur.inc;
       if (isWhile) {
-        const condEx = emitLoopCond(cur.cond, fn, localJs, layout, globalOffConst, definedFns);
+        const condEx = emitLoopCond(cur.cond, fn, localJs, localAddr, layout, globalOffConst, definedFns);
         s += `${indent}while (${condEx}) {\n`;
-        s += emitStmt(cur.then, fn, localJs, layout, globalOffConst, definedFns, indent + "  ", false);
+        s += emitStmt(cur.then, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent + "  ", false);
         s += `${indent}}\n`;
       } else {
         const initS = cur.init
-          ? emitStmt(cur.init, fn, localJs, layout, globalOffConst, definedFns, "", true)
+          ? emitStmt(cur.init, fn, localJs, localAddr, layout, globalOffConst, definedFns, "", true)
               .replace(/\n+/g, " ")
               .trim()
               .replace(/;\s*$/, "")
           : "";
-        const condEx = emitLoopCond(cur.cond, fn, localJs, layout, globalOffConst, definedFns);
-        const incEx = cur.inc ? emitExpr(cur.inc, fn, localJs, layout, globalOffConst, definedFns) : "";
+        const condEx = emitLoopCond(cur.cond, fn, localJs, localAddr, layout, globalOffConst, definedFns);
+        const incEx = cur.inc ? emitExpr(cur.inc, fn, localJs, localAddr, layout, globalOffConst, definedFns) : "";
         s += `${indent}for (${initS}; ${condEx}; ${incEx}) {\n`;
-        s += emitStmt(cur.then, fn, localJs, layout, globalOffConst, definedFns, indent + "  ", false);
+        s += emitStmt(cur.then, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent + "  ", false);
         s += `${indent}}\n`;
       }
+      break;
+    }
+    case NodeKind.Do: {
+      const condEx = emitLoopCond(cur.cond, fn, localJs, localAddr, layout, globalOffConst, definedFns);
+      s += `${indent}do {\n`;
+      s += emitStmt(cur.then, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent + "  ", false);
+      s += `${indent}} while (${condEx});\n`;
       break;
     }
     case NodeKind.Break: {
@@ -495,22 +603,22 @@ function emitStmt(
         s += `${indent}{\n`;
         let n: Node | null = blk.body;
         while (n && n.kind !== NodeKind.Case) {
-          s += emitStmt(n, fn, localJs, layout, globalOffConst, definedFns, ind2, false);
+          s += emitStmt(n, fn, localJs, localAddr, layout, globalOffConst, definedFns, ind2, false);
           n = n.next;
         }
-        const disc = emitExpr(cur.cond, fn, localJs, layout, globalOffConst, definedFns);
+        const disc = emitExpr(cur.cond, fn, localJs, localAddr, layout, globalOffConst, definedFns);
         s += `${ind2}const ${v} = (${disc});\n`;
         s += `${ind2}${swLab}: switch (true) {\n`;
         for (; n && n.kind === NodeKind.Case; n = n.next) {
           s += `${ind2}  case __rt.eq(${v}, ${n.begin}n):\n`;
           for (let st = n.body; st; st = st.next)
-            s += emitStmt(st, fn, localJs, layout, globalOffConst, definedFns, ind2 + "    ", false);
+            s += emitStmt(st, fn, localJs, localAddr, layout, globalOffConst, definedFns, ind2 + "    ", false);
         }
         if (cur.defaultCase) {
           s += `${ind2}  default:\n`;
           let dst: Node | null = cur.defaultCase;
           while (dst) {
-            s += emitStmt(dst, fn, localJs, layout, globalOffConst, definedFns, ind2 + "    ", false);
+            s += emitStmt(dst, fn, localJs, localAddr, layout, globalOffConst, definedFns, ind2 + "    ", false);
             dst = dst.next;
           }
         }
@@ -524,7 +632,7 @@ function emitStmt(
     default:
       s += `${indent}/* ${cur.kind} */\n`;
   }
-  if (chain && cur.next) s += emitStmt(cur.next, fn, localJs, layout, globalOffConst, definedFns, indent, true);
+  if (chain && cur.next) s += emitStmt(cur.next, fn, localJs, localAddr, layout, globalOffConst, definedFns, indent, true);
   return s;
 }
 
@@ -552,25 +660,39 @@ export function codegen(prog: Obj | null): { source: string; layout: Layout } {
     if (!g.isFunction || !g.body) continue;
     const fn = g;
     const localJs = new Map<Obj, string>();
+    const localAddr = new Map<Obj, string>();
+    const addrTaken = new Set<Obj>();
+    collectAddressTakenLocals(fn.body, addrTaken);
     let li = 0;
-    for (let l = fn.locals; l; l = l.next) localJs.set(l, `l${li++}`);
+    for (let l = fn.locals; l; l = l.next) {
+      const mustMem =
+        addrTaken.has(l) ||
+        l.ty.kind === TypeKind.Array ||
+        l.ty.kind === TypeKind.Struct ||
+        l.ty.kind === TypeKind.Union;
+      if (mustMem) localAddr.set(l, `a_l${li++}`);
+      else localJs.set(l, `l${li++}`);
+    }
 
     const ordered = paramsInOrder(fn);
     const argList = ordered.map((_, i) => `a${i}`).join(", ");
     lines.push(`function ${jsIdent("fn_" + fn.name)}(${argList}) {`);
 
     for (let l = fn.locals; l; l = l.next) {
-      const j = localJs.get(l)!;
-      if (l.ty.kind === TypeKind.Array && l.ty.base === tyChar) lines.push(`let ${j} = 0n;`);
-      else lines.push(`let ${j} = 0n;`);
+      const a = localAddr.get(l);
+      if (a) lines.push(`const ${a} = __rt.stackAlloc(${l.ty.size}n, ${l.align});`);
+      const j = localJs.get(l);
+      if (j) lines.push(`let ${j} = 0n;`);
     }
     for (let i = 0; i < ordered.length; i++) {
       const l = ordered[i]!;
-      lines.push(`${localJs.get(l)!} = BigInt(a${i});`);
+      const a = localAddr.get(l);
+      if (a) lines.push(`__rt.store(${a}, BigInt(a${i}), ${l.ty.size});`);
+      else lines.push(`${localJs.get(l)!} = BigInt(a${i});`);
     }
 
     switchBreakTargets.length = 0;
-    const body = emitStmt(fn.body, fn, localJs, layout, globalOffConst, definedFns, "  ");
+    const body = emitStmt(fn.body, fn, localJs, localAddr, layout, globalOffConst, definedFns, "  ");
     lines.push(body);
     lines.push(`}`);
   }

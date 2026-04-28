@@ -109,7 +109,21 @@ export class Preprocessor {
 
   /** Runs directive pass then macro expansion; returns a new token stream head. */
   process(head: Token | null): Token | null {
-    return this.expand(this.directives(head));
+    return this.directives(head);
+  }
+
+  private cloneRange(start: Token, endExclusive: Token | null): Token | null {
+    if (start === endExclusive) return null;
+    const head = copyTok(start);
+    let cur = head;
+    let p = start.next;
+    while (p && p !== endExclusive) {
+      cur.next = copyTok(p);
+      cur = cur.next;
+      p = p.next;
+    }
+    cur.next = { ...copyTok(cur), kind: TokenKind.Eof, next: null, loc: 0, len: 0 };
+    return head;
   }
 
   /** Strips/handlers for `#include`, `#define`, `#if`, etc.; emits non-directive tokens. */
@@ -134,6 +148,14 @@ export class Preprocessor {
     let condStack: { skip: boolean; branchTaken: boolean }[] = [];
 
     const skipping = () => condStack.some((c) => c.skip);
+    const emitChain = (t: Token | null) => {
+      let p = t;
+      while (p && p.kind !== TokenKind.Eof) {
+        cur.next = copyTok(p);
+        cur = cur.next;
+        p = p.next;
+      }
+    };
 
     let tok = head;
     while (tok && tok.kind !== TokenKind.Eof) {
@@ -177,8 +199,7 @@ export class Preprocessor {
           const file = newFile(incPath, dir.file.fileNo + 1000, inner);
           let incTok: Token | null = tokenize(file);
           incTok = this.directives(incTok);
-          const merged = appendTok(incTok, tok);
-          tok = merged;
+          emitChain(incTok);
           continue;
         }
 
@@ -192,14 +213,45 @@ export class Preprocessor {
           const mname = tokStr(p);
           p = p.next;
           const body: Token[] = [];
+          let params: string[] | null = null;
+          let variadic = false;
+          // Function-like macro: NAME(...). The invocation form is only when '(' is not
+          // separated from the macro name by whitespace.
           if (p && equal(p, "(") && !p.hasSpace) {
-            errorTok(p, "function-like macros are not supported in nodec yet");
+            params = [];
+            p = p.next;
+            if (!p) errorTok(dir, "unterminated macro parameter list");
+            if (p && equal(p, ")")) {
+              // Zero-arg macro.
+              p = p.next;
+            } else {
+              while (p && !p.atBol && p.kind !== TokenKind.Eof) {
+                if (equal(p, "...")) {
+                  variadic = true;
+                  params.push("__VA_ARGS__");
+                  p = p.next;
+                  if (!p || !equal(p, ")")) errorTok(dir, "expected ')' after ...");
+                  p = p.next;
+                  break;
+                }
+                if (p.kind !== TokenKind.Ident) errorTok(p, "expected macro parameter name");
+                params.push(tokStr(p));
+                p = p.next;
+                if (!p) errorTok(dir, "unterminated macro parameter list");
+                if (equal(p, ")")) {
+                  p = p.next;
+                  break;
+                }
+                if (!equal(p, ",")) errorTok(p, "expected ',' or ')' in macro parameter list");
+                p = p.next;
+              }
+            }
           }
           while (p && !p.atBol && p.kind !== TokenKind.Eof) {
             body.push(copyTok(p));
             p = p.next;
           }
-          this.macros.set(mname, { tokens: body, params: null, variadic: false });
+          this.macros.set(mname, { tokens: body, params, variadic });
           tok = p;
           continue;
         }
@@ -288,9 +340,15 @@ export class Preprocessor {
         continue;
       }
 
-      cur.next = copyTok(tok);
-      cur = cur.next;
-      tok = tok.next;
+      // Expand non-directive token runs immediately so macro redefinitions
+      // later in the file do not retroactively affect earlier code.
+      const segStart = tok;
+      let segEnd: Token | null = tok;
+      while (segEnd && segEnd.kind !== TokenKind.Eof && !isHash(segEnd)) segEnd = segEnd.next;
+      const seg = this.cloneRange(segStart, segEnd);
+      const expanded = this.expand(seg);
+      emitChain(expanded);
+      tok = segEnd;
     }
 
     cur.next = {
@@ -394,8 +452,122 @@ export class Preprocessor {
     return parseOr();
   }
 
-  /** Expands object-like macros on a linear token stream (hideset prevents infinite recursion). */
+  private captureMacroArgs(
+    openParen: Token,
+    params: string[],
+    variadic: boolean
+  ): { args: Token[][]; endTok: Token | null; vaTokens: Token[] | null } {
+    // openParen is the '(' token, parse until its matching ')'.
+    let t = openParen.next;
+    if (!t) errorTok(openParen, "unterminated macro invocation");
+
+    const args: Token[][] = [];
+    let cur: Token[] = [];
+    let depth = 0;
+    // Special-case empty argument list: NAME()
+    if (t && equal(t, ")")) return { args: [], endTok: t.next, vaTokens: variadic ? [] : null };
+
+    while (t && t.kind !== TokenKind.Eof) {
+      if (equal(t, "(")) {
+        depth++;
+        cur.push(copyTok(t));
+        t = t.next;
+        continue;
+      }
+      if (equal(t, ")")) {
+        if (depth === 0) {
+          args.push(cur);
+          t = t.next;
+          break;
+        }
+        depth--;
+        cur.push(copyTok(t));
+        t = t.next;
+        continue;
+      }
+      if (equal(t, ",") && depth === 0) {
+        args.push(cur);
+        cur = [];
+        t = t.next;
+        continue;
+      }
+      cur.push(copyTok(t));
+      t = t.next;
+    }
+
+    const expected = variadic ? Math.max(0, params.length - 1) : params.length;
+    if (!variadic && args.length !== expected) {
+      errorTok(openParen, "macro argument count mismatch: expected %d, got %d", expected, args.length);
+    }
+    if (variadic && args.length < expected) {
+      errorTok(openParen, "macro argument count mismatch: expected at least %d, got %d", expected, args.length);
+    }
+
+    let vaTokens: Token[] | null = null;
+    if (variadic) {
+      const fixedCount = Math.max(0, params.length - 1);
+      // Re-scan the invocation to capture tokens (including commas) for the variadic tail.
+      vaTokens = [];
+      let argIndex = 0;
+      let depth2 = 0;
+      let u: Token | null = openParen.next;
+      if (u && equal(u, ")")) {
+        // nothing
+      } else {
+        while (u && u.kind !== TokenKind.Eof) {
+          if (equal(u, "(")) depth2++;
+          else if (equal(u, ")")) {
+            if (depth2 === 0) break;
+            depth2--;
+          } else if (equal(u, ",") && depth2 === 0) {
+            argIndex++;
+            if (argIndex >= fixedCount) vaTokens.push(copyTok(u));
+            u = u.next;
+            continue;
+          }
+          if (argIndex >= fixedCount) vaTokens.push(copyTok(u));
+          u = u.next;
+        }
+      }
+    }
+
+    return { args, endTok: t, vaTokens };
+  }
+
+  private substituteMacroBody(
+    body: Token[],
+    params: string[],
+    variadic: boolean,
+    args: Token[][],
+    vaTokens: Token[] | null
+  ): Token[] {
+    const byName = new Map<string, Token[]>();
+    const fixedCount = variadic ? Math.max(0, params.length - 1) : params.length;
+    for (let i = 0; i < fixedCount; i++) byName.set(params[i]!, args[i] ?? []);
+    if (variadic) {
+      byName.set("__VA_ARGS__", vaTokens ?? []);
+    }
+
+    const out: Token[] = [];
+    for (const t of body) {
+      if (t.kind === TokenKind.Ident) {
+        const repl = byName.get(tokStr(t));
+        if (repl) {
+          for (const rt of repl) out.push(copyTok(rt));
+          continue;
+        }
+      }
+      out.push(copyTok(t));
+    }
+    return out;
+  }
+
+  /** Expands macros on a linear token stream (hideset prevents infinite recursion). */
   private expand(head: Token | null): Token | null {
+    return this.expandWithHide(head, new Set());
+  }
+
+  private expandWithHide(head: Token | null, hide: Set<string>): Token | null {
     const h: Token = {
       kind: TokenKind.Eof,
       next: null,
@@ -417,9 +589,43 @@ export class Preprocessor {
     while (tok && tok.kind !== TokenKind.Eof) {
       if (tok.kind === TokenKind.Ident) {
         const name = tokStr(tok);
+        if (hide.has(name)) {
+          cur.next = copyTok(tok);
+          cur = cur.next;
+          tok = tok.next;
+          continue;
+        }
         const m = this.macros.get(name);
-        if (m && m.params === null) {
-          const expanded = this.expandList(m.tokens, new Set([name]));
+        if (m) {
+          // Function-like: NAME(...)
+          if (m.params !== null) {
+            // Accept invocation with immediate '(' token next.
+            const nxt = tok.next;
+            if (!nxt || !equal(nxt, "(")) {
+              // Not an invocation; leave as-is.
+              cur.next = copyTok(tok);
+              cur = cur.next;
+              tok = tok.next;
+              continue;
+            }
+            const { args, endTok, vaTokens } = this.captureMacroArgs(nxt, m.params, m.variadic);
+            const substituted = this.substituteMacroBody(m.tokens, m.params, m.variadic, args, vaTokens);
+            const nh = new Set(hide);
+            nh.add(name);
+            const expanded = this.expandList(substituted, nh);
+            let e = expanded;
+            while (e) {
+              cur.next = e;
+              cur = e;
+              e = e.next!;
+            }
+            tok = endTok;
+            continue;
+          }
+          // Object-like.
+          const nh = new Set(hide);
+          nh.add(name);
+          const expanded = this.expandList(m.tokens, nh);
           let e = expanded;
           while (e) {
             cur.next = e;
@@ -455,49 +661,24 @@ export class Preprocessor {
 
   /** Expands a macro body token list while `hide` blocks re-expansion of active macro names. */
   private expandList(tokens: Token[], hide: Set<string>): Token | null {
-    const h: Token = {
-      kind: TokenKind.Eof,
-      next: null,
-      val: 0n,
-      fval: 0,
-      loc: 0,
-      len: 0,
-      ty: null,
-      str: null,
-      file: tokens[0]?.file!,
-      filename: "",
-      lineNo: 1,
-      lineDelta: 0,
-      atBol: false,
-      hasSpace: false,
-    };
-    let cur = h;
-    for (const t of tokens) {
-      if (t.kind === TokenKind.Ident) {
-        const name = tokStr(t);
-        if (hide.has(name)) {
-          cur.next = copyTok(t);
-          cur = cur.next;
-          continue;
-        }
-        const m = this.macros.get(name);
-        if (m && m.params === null) {
-          const nh = new Set(hide);
-          nh.add(name);
-          let e = this.expandList(m.tokens, nh);
-          while (e) {
-            cur.next = e;
-            cur = e;
-            e = e.next!;
-          }
-          continue;
-        }
-      }
-      cur.next = copyTok(t);
+    // Build a temporary linear stream and reuse the main expander.
+    if (tokens.length === 0) return null;
+    const head = copyTok(tokens[0]!);
+    let cur = head;
+    for (let i = 1; i < tokens.length; i++) {
+      cur.next = copyTok(tokens[i]!);
       cur = cur.next;
     }
-    cur.next = null;
-    return h.next;
+    cur.next = { ...copyTok(tokens[tokens.length - 1]!), kind: TokenKind.Eof, next: null, len: 0, loc: 0 };
+    const expanded = this.expandWithHide(head, hide);
+    if (!expanded) return null;
+    // Macro-body expansion should return a plain token chain (no EOF sentinel),
+    // otherwise callers may splice an early EOF into the middle of a stream.
+    if (expanded.kind === TokenKind.Eof) return null;
+    let p: Token = expanded;
+    while (p.next && p.next.kind !== TokenKind.Eof) p = p.next;
+    if (p.next && p.next.kind === TokenKind.Eof) p.next = null;
+    return expanded;
   }
 }
 

@@ -15,6 +15,7 @@ import { createRuntime } from "../dist/runtime.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const benchCPath = resolve(repoRoot, "examples/bench_sum.c");
+const inceptionCPath = resolve(repoRoot, "examples/mjs_inception_full.c");
 const N = 1_000_000;
 
 function expectedChecksum(n) {
@@ -38,13 +39,45 @@ function bench(name, fn, n = N, iterations = 7) {
   }
   times.sort((a, b) => a - b);
   const med = times[Math.floor(times.length / 2)];
-  return { name, n, medianMs: med, checksum: exp };
+  return { name, n, iterations, medianMs: med, checksum: exp };
+}
+
+function benchExitCode(name, fn, expected = 0, iterations = 5) {
+  for (let w = 0; w < 1; w++) {
+    const r = fn();
+    if (r !== expected) throw new Error(`${name}: exit ${r} !== expected ${expected}`);
+  }
+  const times = [];
+  for (let i = 0; i < iterations; i++) {
+    const t0 = performance.now();
+    const r = fn();
+    times.push(performance.now() - t0);
+    if (r !== expected) throw new Error(`${name}: wrong exit code`);
+  }
+  times.sort((a, b) => a - b);
+  const med = times[Math.floor(times.length / 2)];
+  return { name, iterations, medianMs: med, expected };
 }
 
 function runNodecBench() {
   const src = readFileSync(benchCPath, "utf8");
   const { source, layout } = compileSource(benchCPath, src, defaultIncludePaths(benchCPath));
   const script = new vm.Script(source, { filename: "bench-generated.js" });
+  const hooks = { log: () => {} };
+  return () => {
+    const mem = Uint8Array.from(layout.memory);
+    const __rt = createRuntime(mem, hooks, layout.heapBase);
+    const sandbox = Object.create(null);
+    const factory = script.runInNewContext(sandbox, { timeout: 120_000 });
+    const mod = factory(__rt);
+    return Number(mod.fn_main());
+  };
+}
+
+function runNodecInceptionBench() {
+  const src = readFileSync(inceptionCPath, "utf8");
+  const { source, layout } = compileSource(inceptionCPath, src, defaultIncludePaths(inceptionCPath));
+  const script = new vm.Script(source, { filename: "inception-generated.js" });
   const hooks = { log: () => {} };
   return () => {
     const mem = Uint8Array.from(layout.memory);
@@ -90,12 +123,13 @@ const rows = [];
 rows.push(bench("nodec C (linear memory + emitted loop)", runNodecBench()));
 rows.push(bench("Plain JS (Uint8Array index, same algorithm)", runPlainUint8Array()));
 rows.push(bench("JS anti-pattern (new DataView per store & load)", runPerAccessDataView(), N, 5));
+const inceptionRow = benchExitCode("Inception stack (Node -> nodec -> mjs)", runNodecInceptionBench(), 0, 5);
 
 console.log(`N = ${N}, checksum ≡ ${rows[0].checksum} (mod 251)`);
 console.log("");
 console.log("Median wall time per run (same V8 / same machine):");
 for (const r of rows) {
-  console.log(`  ${r.medianMs.toFixed(2).padStart(8)} ms  ${r.name}`);
+  console.log(`  ${r.medianMs.toFixed(2).padStart(8)} ms  ${r.name}  [n=${r.iterations}]`);
 }
 const [nodec, plain, anti] = rows;
 console.log("");
@@ -107,4 +141,9 @@ console.log(
 );
 console.log(
   "Takeaway: interpreted-through-JS C is not magic vs tuned JS, but a tight linear-memory lowering plus a sane runtime beats JS that repeats expensive host allocations in the hot path.",
+);
+console.log("");
+console.log("Inception benchmark:");
+console.log(
+  `  ${inceptionRow.medianMs.toFixed(2).padStart(8)} ms  ${inceptionRow.name}  [n=${inceptionRow.iterations}, exit=${inceptionRow.expected}]`,
 );
