@@ -356,9 +356,6 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
   };
 
   const fwrite = (ptr: bigint, size: bigint, nmemb: bigint, stream: bigint) => {
-    const id = readFileSlotId(stream);
-    if (id === null) return 0n;
-    const slot = fileSlots.get(id)!;
     const sz = Number(size);
     const n = Number(nmemb);
     if (sz <= 0 || n <= 0) return 0n;
@@ -368,6 +365,13 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
     const p = Number(ptr);
     if (p < 0 || p >= mem.length) return 0n;
     totalBytes = Math.min(totalBytes, mem.length - p);
+    const id = readFileSlotId(stream);
+    if (id === null) {
+      const slice = mem.subarray(p, p + totalBytes);
+      process.stdout.write(Buffer.from(slice));
+      return BigInt(Math.trunc(totalBytes / sz));
+    }
+    const slot = fileSlots.get(id)!;
     let sent = 0;
     while (sent < totalBytes) {
       const chunk = Math.min(65536, totalBytes - sent);
@@ -691,6 +695,11 @@ export function createRuntime(mem: Uint8Array, hooks: HostHooks, heapBase: numbe
         }
       }
       return BigInt(line.length);
+    }
+    if (name === "putchar") {
+      const ch = Math.trunc(Number(args[0] ?? 0n)) & 0xff;
+      process.stdout.write(String.fromCharCode(ch));
+      return BigInt(ch);
     }
     hooks.log(`[nodec] unimplemented host call: ${name}`);
     return 0n;
